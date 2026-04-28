@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1080" height="1920" fill="none">
+  <defs>
+    <linearGradient id="a" x1="140" x2="940" y1="120" y2="1760" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0F766E"/>
+      <stop offset="1" stop-color="#FB923C"/>
+    </linearGradient>
+  </defs>
+  <rect width="1080" height="1920" fill="#102A43"/>
+  <rect width="1080" height="1920" fill="url(#a)" opacity=".86"/>
+  <circle cx="210" cy="300" r="150" fill="#F8FAFC" opacity=".12"/>
+  <circle cx="860" cy="540" r="220" fill="#F8FAFC" opacity=".12"/>
+  <circle cx="740" cy="1450" r="240" fill="#F8FAFC" opacity=".09"/>
+  <rect x="84" y="112" width="912" height="1696" rx="52" fill="#F8FAFC" fill-opacity=".12" stroke="#F8FAFC" stroke-opacity=".38" stroke-width="4"/>
+  <path stroke="#F8FAFC" stroke-opacity=".55" stroke-width="6" d="M170 470c123-79 231 71 355 71 98 0 190-104 302-104 80 0 137 57 170 101"/>
+  <path fill="#F8FAFC" fill-opacity=".86" d="M170 1423h740v7H170zM170 1456h531v7H170z"/>
+  <text x="170" y="350" fill="#F8FAFC" font-family="Georgia, serif" font-size="92" letter-spacing="8">MONTAJ</text>
+  <text x="170" y="1310" fill="#F8FAFC" font-family="Georgia, serif" font-size="54">Drop your travel photos to start the Week 1 preview.</text>
+  <text x="170" y="1548" fill="#F8FAFC" font-family="Georgia, serif" font-size="42" letter-spacing="6">BASIC SLIDESHOW / FIXED TIMING / MUSIC PREVIEW</text>
+</svg>
