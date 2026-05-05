@@ -7,34 +7,45 @@ Project-scoped notes. The repo-root `CLAUDE.md` (one directory up) covers global
 - **Framework:** Next.js 16 App Router, Tailwind 4, TypeScript.
 - **Video engine:** Remotion 4.0.457 — `remotion`, `@remotion/player`, `@remotion/transitions` are all pinned to that minor. Do not bump only one of them; that produces two parallel `remotion` packages and breaks the player context at runtime.
 - **AI selection:** runs through `scripts/analyze.sh`, which spawns `claude -p` headless with `--system-prompt`, `--json-schema`, `--allowedTools Read`, and `--dangerously-skip-permissions`. The Next.js route at `src/app/api/analyze/route.ts` decodes incoming data URLs to a temp dir, spawns the bash script, and parses `structured_output`. There is no OpenAI dependency.
+- **HEVC transcode:** every video upload posts to `POST /api/transcode-video`. The route streams the file to `/tmp/montaj-transcode-*`, ffprobes it, returns `204 No Content` for H.264 inputs, and otherwise transcodes via `ffmpeg -c:v libx264 -vf scale=1280 -r 30 -crf 23 -g 30 -keyint_min 30 -sc_threshold 0 -movflags +faststart -c:a aac`. Server-side `ffmpeg` + `ffprobe` must be on `PATH` (`brew install ffmpeg` on macOS). 250 MB input cap; 120 s `maxDuration`.
 - **Music tracks:** seven 24-s loops in `public/music/*.wav`. Regenerate with `node scripts/gen-music.mjs` (procedural kick + pad + hat synth at four BPMs).
 - **Dev server:** `PORT=3737 npm run dev`. Type-check / lint: `npx tsc --noEmit && npm run lint`.
 
 ## Conventions
 
-- **Beat math:** `beatPeriodSeconds = 60 / bpm`. Reel total = sum(beats × beatPeriodSeconds × fps) − sum(transition overlap frames). Transition overlap = `min(prevSlotFrames/2, nextSlotFrames/2, 12)`.
+- **Beat math:** `beatPeriodSeconds = 60 / bpm`. Reel total = `sum(perSlotFrames) − sum(transitionOverlaps)`. Transition overlap = `max(2, min(prevSlotFrames/2, nextSlotFrames/2, TRANSITION_FRAMES))`.
 - **Per-clip state:** every `TimelineMedia` carries `beats`. Videos additionally carry `videoStartBeats` (head trim). The cap is `floor(durationSeconds / beatPeriodSeconds)`. The `setTrim(id, startBeats, beats)` handler is the single source of truth — don't update `beats` and `videoStartBeats` separately.
+- **Player composition length:** `durationInFrames = timeline.length === 0 ? FPS * 5 : Math.max(totalFrames, 1)`. Don't pad with `Math.max(totalFrames, FPS * 5)` — that re-introduces the static-tail-frame bug at end of short reels.
+- **Rail/player alignment:** the rail receives `transitionFrames` and re-derives `perSlotPlayerStartFrames` using the same overlap formula. `totalSeconds` is read from `totalDurationFrames / fps`, never from raw beats × beat-period (those don't subtract overlaps).
 - **8–30 s reel clamp** lives in `montaj-week-one.tsx` (constants `MIN_REEL_SECONDS`, `MAX_REEL_SECONDS`) and `timeline-rail.tsx` (UI warnings + `+1b` disable when over).
 - **Pixel↔beat:** `PX_PER_BEAT = 44` in `timeline-rail.tsx`. Same constant is used for clip widths, beat tick spacing, click-to-seek mapping, and drag-snap thresholds.
 - **Transitions:** use `TransitionSeries` from `@remotion/transitions`, not raw `Sequence`s. Cycle is fade → slide → wipe.
+- **Video element:** `<Video>` (not `OffthreadVideo`) inside the slot, with `pauseWhenBuffering={false}` and `acceptableTimeShiftInSeconds={10}`. Pass `trimBefore={startFrom}` only when `startFrom > 0` — passing a defined `0` makes Remotion wrap the video in an extra `<Sequence layout="none">` that interacts badly with `TransitionSeries`.
 - **Audio:** wrap `Html5Audio` in Remotion's `<Loop>` with `durationInFrames = MUSIC_LENGTH_SECONDS × fps` so reels longer than 24 s don't go silent.
 
 ## Active issue
 
-**"Broken video" rendering** reported after the front-trim refactor. Investigation steps:
+**Trim still stutters on HEVC-sourced clips, even after the 720 p / 1-second-keyframe transcode and the `<Video>` swap.** First upload is smooth, full-length playback is smooth, but dragging the front-trim handle to set `videoStartBeats > 0` and pressing play produces visible stalls partway through. The transcoded preview is already small (720×1280, ~4 Mbps, keyframes every 30 frames), so simple decode load is unlikely to be the only culprit.
 
-1. Drive the page via Playwright (either install the Playwright MCP — `claude mcp add playwright -- npx @playwright/mcp@latest` then restart Claude Code — or add `@playwright/test` as a devDep here). Drop a real ≥4-s clip and screenshot the result.
-2. **Suspect 1: `OffthreadVideo startFrom`.** The current code passes `startFrom={0}` for un-trimmed videos. `startFrom` is a deprecated alias for `trimBefore`; `startFrom={0}` *should* be a no-op but may warn or behave oddly. Try: only pass the prop when `videoStartBeats > 0`, and rename to `trimBefore` for clarity.
-3. **Suspect 2: the ghost filmstrip in `timeline-rail.tsx`.** If only the rail thumbnail looks broken (not the preview), the new 3-segment bar's flex/percent math may be off when `videoStartBeats === 0` (head segment width 0 % can collapse). Check `headPct + activePct ≤ 100`.
-4. **Suspect 3: stale `beats` from before the floor() change.** A previous session may have stored `beats > maxBeats` (we used `round()` then). On reload state is empty, but if HMR persisted state during my refactor that could be it. Reload the page fresh to rule out.
+Try in order (cheap first; stop when stutter is gone):
+
+1. **Cap preview to 480 p, lower bitrate.** In `src/app/api/transcode-video/route.ts` change the scale filter to `scale=w=720:h=720:force_original_aspect_ratio=decrease` and `-crf 28`. Re-upload an iPhone clip, trim, play.
+2. **Add `-tune fastdecode`** to the libx264 args. Disables in-loop filters and CABAC, reducing per-frame decode work.
+3. **Audit `<Video>` premount in `TransitionSeries`.** Each transition mounts the next slot ahead of time; the underlying `<video>` does its first seek-to-`trimBefore` while the previous slot is still rendering. If the seek itself is what stalls, premounting earlier (or pre-warming via a hidden `<video preload="auto" src={...}>` at upload time) could absorb the cost. Logging `mediaRef.current.readyState` over time during a trimmed-clip slot would confirm.
+4. **Try `OffthreadVideo` over the new short-keyframe transcode.** I switched away because it seek-per-frame stalled on 1080 p HEVC; on a 720 p H.264 file with 1 s keyframes, `OffthreadVideo`'s deterministic frame-pull may now beat the native pipeline.
+5. **Pre-extract frames on upload.** Last resort: `ffmpeg -vf fps=30 frame-%04d.jpg`, feed an `<Img>` sequence into the player. Slower upload, perfect playback, perfect render parity. Probably overkill but guaranteed to work.
+
+Reproduction: `tmp-demo/hevc/IMG_1801.MOV` (20 s, 1920×1080, HEVC, AAC). Drop into the page, drag left edge of the clip to set head-trim ~3 s, click play. Same file works smoothly without trim.
+
+A secondary minor issue: the soundtrack loop seam at 24 s is faintly audible on short reels. The user accepted it for now; longer tracks dilute it. Crossfading the loop point in `scripts/gen-music.mjs` is a one-bar fix when desired.
 
 ## Next steps (ordered)
 
-Do them in this order — earlier steps reduce risk for later ones, and the broken-video fix has to come before any new feature lands or we'll be debugging two regressions instead of one.
+Do them in this order — earlier steps reduce risk for later ones, and the trim-stutter fix has to come before any new feature lands or we'll be debugging two regressions instead of one.
 
-### 1. Fix the broken-video render (blocker)
+### 1. Fix the trim-stutter on HEVC clips (blocker)
 
-See "Active issue" above. Walk the page in Playwright, screenshot, and follow suspects 1–3.
+See "Active issue" above. Walk the page in Playwright with one of the `tmp-demo/hevc/*.MOV` files, screenshot, and burn through the 5 hypotheses.
 
 ### 2. Smart video trim — AI picks the right window
 
@@ -53,9 +64,9 @@ See "Active issue" above. Walk the page in Playwright, screenshot, and follow su
   - `src/components/montaj-week-one.tsx` — add a "Smart trim" button per video clip, or auto-call after upload
   - `src/lib/ai.ts` — add `TrimSuggestion` type
 - **Gotchas:**
-  - ffmpeg must be on `PATH` server-side; surface a clear error in the UI if missing.
-  - HEVC / H.265 mp4s from iPhones may need `ffmpeg -c:v libx264` re-encode before frame extraction; do this lazily.
-  - Cap input video size — refuse anything > 200 MB to keep temp dirs sane.
+  - ffmpeg is already required for `/api/transcode-video`; no new dependency.
+  - For HEVC inputs, sample frames from the *transcoded* H.264 file, not the original — the transcode route already produced one and the path could be passed through.
+  - Cap input video size — refuse anything > 200 MB to keep temp dirs sane (mirrors the transcode cap of 250 MB).
   - Don't block upload on trim suggestion — run it as a background `Promise` and patch `videoStartBeats` / `beats` when it returns.
 
 ### 3. AI picks reel timing — music length matched to content
@@ -94,7 +105,7 @@ See "Active issue" above. Walk the page in Playwright, screenshot, and follow su
 
 ### 5. Remaining Week 4 work
 
-- **MP4 export** — Remotion `@remotion/renderer` server route, with a "video-only" branch when the soundtrack is yt-dlp-fetched.
+- **MP4 export** — Remotion `@remotion/renderer` server route, with a "video-only" branch when the soundtrack is yt-dlp-fetched. Note: the slot uses `<Video>` for preview smoothness; renderer mode honors that, but if fidelity issues appear, swapping to `<OffthreadVideo>` for render only (via `getRemotionEnvironment().isRendering`) is a documented escape hatch.
 - **Natural-language AI refinement** — "make the intro faster", "swap clip 3 for a wider shot". Single `/api/refine` endpoint that takes the current timeline + a prompt and returns a patch (reorders, beat changes, swaps).
 - **Vibe / mood selector** — text → biases AI selection prompts (`scripts/analyze.sh`) and editing pace.
 - **Live Supabase + Clerk provisioning** — wire to a real project so uploads persist per user. The repo-root `CLAUDE.md` already documents the Clerk-Supabase native integration pattern.
@@ -111,20 +122,30 @@ sips -Z 512 tmp-demo/beach.png --out tmp-demo/upscaled/beach.png
 MAX_PICKS=3 CLAUDE_MODEL=haiku scripts/analyze.sh \
   "id=beach:$PWD/tmp-demo/upscaled/beach.png"
 
-# End-to-end via the API route (requires dev server running)
+# End-to-end via the AI API route (requires dev server running)
 curl -s -X POST -H "Content-Type: application/json" \
   --data @/tmp/montaj-body.json http://localhost:3737/api/analyze
+
+# Smoke the HEVC transcode route
+curl -s -o /tmp/out.mp4 -D - -X POST \
+  -F "video=@tmp-demo/hevc/IMG_1803.MOV" \
+  http://localhost:3737/api/transcode-video
+ffprobe -v error -select_streams v:0 \
+  -show_entries packet=pts_time,flags -of csv=p=0 /tmp/out.mp4 | grep ',K'
+# expect one keyframe per second
 ```
 
 ## File map
 
 | File | Purpose |
 |---|---|
-| `src/components/montaj-week-one.tsx` | Main page; owns `timeline`, `selectedTrack`, `beatGrid`, `currentFrame`. Holds `playerRef`. |
-| `src/components/timeline-rail.tsx` | CapCut rail. Drag handles, ghost filmstrip, beat ticks, playhead, click-to-seek. |
-| `src/components/slideshow-composition.tsx` | Remotion composition. Per-slot `startFrom` for video front-trim, looped audio, captions, transitions. |
+| `src/components/montaj-week-one.tsx` | Main page; owns `timeline`, `selectedTrack`, `beatGrid`, `currentFrame`. Holds `playerRef`. Computes `perSlotFrames`, `perSlotStartFrames`, `totalFrames`, `durationInFrames`. |
+| `src/components/timeline-rail.tsx` | CapCut rail. Drag handles, ghost filmstrip, beat ticks, playhead, click-to-seek. Consumes `transitionFrames` and computes overlap-aware `perSlotPlayerStartFrames`. |
+| `src/components/slideshow-composition.tsx` | Remotion composition. `<Video>` slots with conditional `trimBefore` for video front-trim, looped audio, captions, transitions. |
 | `src/lib/beats.ts` | Web Audio onset envelope + autocorrelation BPM. Cached per-track. |
-| `src/lib/media.ts` | `TimelineMedia` type, music library, Supabase upload helper, HEIC + video probe. |
+| `src/lib/media.ts` | `TimelineMedia` type, music library, Supabase upload helper, HEIC handling, **`transcodeIfHevc`** that posts video uploads to `/api/transcode-video`. |
 | `src/app/api/analyze/route.ts` | Decodes data URLs to temp dir, spawns `scripts/analyze.sh`, parses JSON, heuristic fallback. |
+| `src/app/api/transcode-video/route.ts` | Streams uploads to `/tmp`, ffprobes codec, returns 204 if H.264, otherwise transcodes via `spawn('ffmpeg', …)` and returns `video/mp4`. 250 MB cap. |
 | `scripts/analyze.sh` | `claude -p` wrapper with strict JSON schema. Prints `structured_output`; exit 4 if absent. |
 | `scripts/gen-music.mjs` | Procedural WAV generator (kick + pad + hat) at four BPMs. |
+| `tmp-demo/hevc/` | Real iPhone HEVC clips (`.MOV`) and HEIC photos for trim-stutter reproduction. Gitignored. |

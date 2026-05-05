@@ -128,6 +128,14 @@ The timeline editor UI is also a significant build — Remotion handles the rend
 
 **Open issue:** user reports a "broken video" rendering after the trim refactor. Investigation pending Playwright MCP install (or a direct `@playwright/test` devDep) for headless visual verification. Suspects logged in `montaj/CLAUDE.md`.
 
+**Status update — playback fixes + HEVC pipeline (committed):**
+- ✅ "Broken-video render" closed. Root cause: `OffthreadVideo` with `startFrom={0}` (a defined-but-zero value) caused Remotion to wrap every video in an extra `<Sequence>` inside `TransitionSeries`. Fix: pass `trimBefore` only when `videoStartBeats > 0`. Verified via Playwright with both un-trimmed and front-trimmed clips.
+- ✅ Timeline rail now stays aligned with the player. Previously the rail walked `perSlotFrames` cumulatively while the player walks `TransitionSeries` (which subtracts overlaps), so the rail's "Total" was ~2.8 s longer than the actual reel and the playhead lagged behind the rendered scene. Rail now receives `transitionFrames`, derives `totalSeconds` from the player-known `totalDurationFrames`, and uses overlap-aware per-slot start frames for both the playhead and click-to-seek.
+- ✅ Switched from `OffthreadVideo` to `<Video>` (with `pauseWhenBuffering={false}` and `acceptableTimeShiftInSeconds={10}`) for native preview playback. Stops Remotion from seeking the underlying `<video>.currentTime` every frame.
+- ✅ Server-side HEVC → H.264 transcode on upload. New `POST /api/transcode-video` (Node runtime, 250 MB cap, 120 s `maxDuration`) streams the upload to `/tmp` via `pipeline(Readable.fromWeb(file.stream()), createWriteStream(...))`, ffprobes the codec, and either returns `204` for H.264 or pipes the file through `ffmpeg -c:v libx264 -preset veryfast -vf scale=w=1280:h=1280:force_original_aspect_ratio=decrease -r 30 -g 30 -keyint_min 30 -sc_threshold 0 -movflags +faststart`. Client side: `transcodeIfHevc` in `media.ts` swaps the response into a fresh `File` so the rest of the upload pipeline is unchanged.
+- ✅ Reels no longer hold a static frame at the end. `durationInFrames` is now exactly `totalFrames` when the timeline has clips; the 5-second minimum only applies to the empty placeholder.
+- ⏸️ **Still stuttering on iPhone clips when trimmed.** Even with the 720p / 1-second-keyframe transcode and `<Video>` swap, dragging the front-trim handle still produces visible stalls in the player. Hypotheses (chase order: cheap first) live in `summarize.md` — drop preview to 480 p, try `-tune fastdecode`, audit `<Video>` premount inside `TransitionSeries`, fall back to `OffthreadVideo` over the new short-keyframe transcode, or pre-extract frames on upload.
+
 ### Week 4 — Audio options + AI refinement + export (~25-30 hours)
 - Support for uploading your own audio or pasting a URL (yt-dlp), with video-only export for URL-sourced audio
 - AI refinement via natural language ("make the intro faster", "swap clip 3")
