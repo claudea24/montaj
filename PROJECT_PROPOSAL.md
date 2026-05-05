@@ -114,6 +114,20 @@ The timeline editor UI is also a significant build — Remotion handles the rend
 - ➕ **Beyond plan:** Aligned `remotion`, `@remotion/player`, and `@remotion/transitions` to the same minor (`4.0.457`) — the initial install left two `remotion` copies side-by-side which would have caused subtle context bugs at runtime.
 - 🧪 **Verification gap:** I haven't driven a real browser through the full upload → AI-pick → reorder → caption flow yet. Type-check (`tsc --noEmit`) and lint pass; the dev server compiles, `GET /` is 200, and `POST /api/analyze` returns 200 with the heuristic fallback when no API key is set. End-to-end click-through is the first thing on the Week 4 list.
 
+**Status update — Week 3 CapCut rebuild (uncommitted at time of writing):**
+- ✅ Layout switched to a CapCut/iMovie pattern: large 9:16 preview centered top, full-width horizontal timeline rail at the bottom, controls (Upload / Soundtrack / AI director) collapsed into a 360-px right sidebar.
+- ✅ Music library expanded from 3 to 7 tracks. Four new procedurally-synthesized loops were added at 92 / 100 / 112 / 128 BPM via `scripts/gen-music.mjs` (kick + pad + hat synth, mono 16-bit 44.1 kHz, 24 s each) so the beat-locked editing is visible across tempos.
+- ✅ Per-clip beat counts: every `TimelineMedia` carries explicit `beats` (and videos carry `videoStartBeats`). The page-level "beats per slot" slider was removed; per-clip control replaces it.
+- ✅ CapCut-style drag handles: each clip has draggable left/right edges with 1-beat snap (44 px/beat), pointer capture, and dim states at min/max. Image clips resize on either edge; video clips treat the left edge as a *front-trim* (advances `videoStartBeats`, keeps the right edge fixed in source time) and the right edge as a *tail trim*.
+- ✅ Video trim is honored in the Remotion preview via `OffthreadVideo startFrom={videoStartBeats × beatPeriod × fps}` — the source actually plays from the trim point.
+- ✅ Grey ghost filmstrip: each video clip shows a 3-segment horizontal bar (head trim · active · tail trim) sized proportionally to `floor(durationSeconds / beatPeriod)`, with hover tooltips and head/tail seconds labels under it.
+- ✅ 8–30 s reel clamp with amber ("under") / rose ("over") warnings. Right handle disables when over.
+- ✅ Auto-fit + 8–30 s target slider: distributes target beats evenly across all clips, capped per-video by its own `maxBeats`. Resets `videoStartBeats` to 0.
+- ✅ Music looping via Remotion's `<Loop>` so reels longer than the 24 s source loop continue without silence.
+- ✅ Playhead + click-to-seek: `useRef<PlayerRef>` subscribes to the Remotion Player's `frameupdate` event; pink vertical line tracks playback on the rail; clicking the rail body computes per-clip x→frame and calls `seekTo`. All inner controls (handles, ✕, caption inputs) carry `stopPropagation` so they don't trigger seek.
+
+**Open issue:** user reports a "broken video" rendering after the trim refactor. Investigation pending Playwright MCP install (or a direct `@playwright/test` devDep) for headless visual verification. Suspects logged in `montaj/CLAUDE.md`.
+
 ### Week 4 — Audio options + AI refinement + export (~25-30 hours)
 - Support for uploading your own audio or pasting a URL (yt-dlp), with video-only export for URL-sourced audio
 - AI refinement via natural language ("make the intro faster", "swap clip 3")

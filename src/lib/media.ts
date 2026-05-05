@@ -13,6 +13,8 @@ export type TimelineMedia = {
   caption?: string;
   scene?: string;
   qualityScore?: number;
+  beats?: number;
+  videoStartBeats?: number;
 };
 
 export type MusicTrack = {
@@ -26,12 +28,44 @@ export type MusicTrack = {
 
 export const MUSIC_LIBRARY: MusicTrack[] = [
   {
+    id: "summer-sprint",
+    name: "Summer Sprint",
+    mood: "Energetic",
+    durationLabel: "0:24",
+    description: "Punchy 128 BPM kick for action montages and quick cuts.",
+    src: "/music/summer-sprint-loop.wav",
+  },
+  {
+    id: "open-road",
+    name: "Open Road",
+    mood: "Adventure",
+    durationLabel: "0:24",
+    description: "Driving 112 BPM mid-tempo for trip recaps and travel arcs.",
+    src: "/music/open-road-loop.wav",
+  },
+  {
     id: "coastline",
     name: "Coastline Loop",
     mood: "Bright",
     durationLabel: "0:24",
     description: "Light pulses for sunny arrival shots and beach panoramas.",
     src: "/music/coastline-loop.wav",
+  },
+  {
+    id: "festival-glow",
+    name: "Festival Glow",
+    mood: "Chill",
+    durationLabel: "0:24",
+    description: "Smooth 100 BPM groove for golden-hour and food cuts.",
+    src: "/music/festival-glow-loop.wav",
+  },
+  {
+    id: "postcard",
+    name: "Postcard Loop",
+    mood: "Warm",
+    durationLabel: "0:24",
+    description: "Soft chimes and a gentle bass pulse for recap-style reels.",
+    src: "/music/postcard-loop.wav",
   },
   {
     id: "night-drive",
@@ -42,12 +76,12 @@ export const MUSIC_LIBRARY: MusicTrack[] = [
     src: "/music/night-drive-loop.wav",
   },
   {
-    id: "postcard",
-    name: "Postcard Loop",
-    mood: "Warm",
+    id: "deep-cove",
+    name: "Deep Cove",
+    mood: "Cinematic",
     durationLabel: "0:24",
-    description: "Soft chimes and a gentle bass pulse for recap-style reels.",
-    src: "/music/postcard-loop.wav",
+    description: "Slow 92 BPM pad for sunsets and contemplative shots.",
+    src: "/music/deep-cove-loop.wav",
   },
 ];
 
@@ -97,6 +131,23 @@ function isVideoFile(file: File) {
   return /\.(mov|mp4|m4v|webm)$/i.test(file.name);
 }
 
+async function transcodeIfHevc(file: File): Promise<File> {
+  const form = new FormData();
+  form.append("video", file);
+  let res: Response;
+  try {
+    res = await fetch("/api/transcode-video", { method: "POST", body: form });
+  } catch {
+    return file;
+  }
+  if (res.status === 204 || !res.ok) {
+    return file;
+  }
+  const buffer = await res.arrayBuffer();
+  const baseName = file.name.replace(/\.(mov|m4v|hevc)$/i, "") || "clip";
+  return new File([buffer], `${baseName}.mp4`, { type: "video/mp4" });
+}
+
 async function probeVideoDuration(blobUrl: string): Promise<number> {
   return new Promise((resolve) => {
     const video = document.createElement("video");
@@ -140,14 +191,15 @@ async function prepareFile(file: File): Promise<PreparedMedia> {
   }
 
   if (isVideoFile(file)) {
-    const src = URL.createObjectURL(file);
+    const playable = await transcodeIfHevc(file);
+    const src = URL.createObjectURL(playable);
     const durationSeconds = await probeVideoDuration(src);
     return {
-      uploadFile: file,
+      uploadFile: playable,
       timeline: {
         id: crypto.randomUUID(),
-        name: file.name,
-        size: file.size,
+        name: playable.name,
+        size: playable.size,
         src,
         kind: "video",
         durationSeconds,

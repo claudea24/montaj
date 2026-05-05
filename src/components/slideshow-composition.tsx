@@ -1,7 +1,8 @@
 import {
   AbsoluteFill,
   Img,
-  OffthreadVideo,
+  Loop,
+  Video,
   staticFile,
   useCurrentFrame,
   useVideoConfig,
@@ -21,7 +22,9 @@ import type { TimelineMedia } from "@/lib/media";
 type SlideshowCompositionProps = {
   images: TimelineMedia[];
   soundtrackSrc: string;
+  soundtrackLoopFrames?: number;
   perSlotFrames?: number[];
+  perSlotStartFrames?: number[];
   fallbackSecondsPerImage: number;
   captions?: string[];
   transitionFrames?: number;
@@ -39,7 +42,9 @@ function presentationFor(name: PresentationName): TransitionPresentation<Record<
 export function SlideshowComposition({
   images,
   soundtrackSrc,
+  soundtrackLoopFrames,
   perSlotFrames,
+  perSlotStartFrames,
   fallbackSecondsPerImage,
   captions,
   transitionFrames = 12,
@@ -59,7 +64,8 @@ export function SlideshowComposition({
     } else {
       frames = Math.max(1, Math.round(fallbackSecondsPerImage * fps));
     }
-    return { item, index, frames };
+    const startFrom = Math.max(0, Math.round(perSlotStartFrames?.[index] ?? 0));
+    return { item, index, frames, startFrom };
   });
 
   return (
@@ -79,7 +85,7 @@ export function SlideshowComposition({
       />
 
       <TransitionSeries>
-        {slots.map(({ item, index, frames }, sequenceIdx) => {
+        {slots.map(({ item, index, frames, startFrom }, sequenceIdx) => {
           const elements = [
             <TransitionSeries.Sequence
               key={item.id}
@@ -89,6 +95,7 @@ export function SlideshowComposition({
                 caption={captions?.[index]}
                 index={index}
                 item={item}
+                startFrom={startFrom}
                 totalFrames={frames}
               />
             </TransitionSeries.Sequence>,
@@ -117,7 +124,13 @@ export function SlideshowComposition({
         })}
       </TransitionSeries>
 
-      <Html5Audio src={soundtrackSrc} volume={0.55} />
+      {soundtrackLoopFrames && soundtrackLoopFrames > 0 ? (
+        <Loop durationInFrames={soundtrackLoopFrames}>
+          <Html5Audio src={soundtrackSrc} volume={0.55} />
+        </Loop>
+      ) : (
+        <Html5Audio src={soundtrackSrc} volume={0.55} />
+      )}
     </AbsoluteFill>
   );
 }
@@ -126,10 +139,11 @@ type SlotContentProps = {
   item: TimelineMedia;
   index: number;
   totalFrames: number;
+  startFrom: number;
   caption?: string;
 };
 
-function SlotContent({ item, index, totalFrames, caption }: SlotContentProps) {
+function SlotContent({ item, index, totalFrames, startFrom, caption }: SlotContentProps) {
   const frame = useCurrentFrame();
   const isVideo = item.kind === "video";
   const variant = index % 4;
@@ -152,9 +166,12 @@ function SlotContent({ item, index, totalFrames, caption }: SlotContentProps) {
   return (
     <AbsoluteFill style={{ alignItems: "center", justifyContent: "center" }}>
       {isVideo ? (
-        <OffthreadVideo
+        <Video
+          acceptableTimeShiftInSeconds={10}
           muted
+          pauseWhenBuffering={false}
           src={item.src}
+          {...(startFrom > 0 ? { trimBefore: startFrom } : {})}
           style={{
             width: "100%",
             height: "100%",
