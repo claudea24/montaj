@@ -152,7 +152,8 @@ export function MontajWeekOne() {
     }
     return sum;
   }, [perSlotFrames]);
-  const durationInFrames = Math.max(totalFrames, FPS * 5);
+  const durationInFrames =
+    timeline.length === 0 ? FPS * 5 : Math.max(totalFrames, 1);
   const totalSeconds = totalFrames / FPS;
 
   const totalSize = useMemo(
