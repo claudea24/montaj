@@ -2,85 +2,72 @@
 
 Project-scoped notes. The repo-root `CLAUDE.md` (one directory up) covers global security and Supabase MCP setup; this file is montaj-specific.
 
-## Resume here — backend setup in progress (paused 2026-05-12)
+## Recent work — backend + deploy shipped (2026-05-12)
 
-**Where we paused:** Step 1 of the 4-step backend setup (see "Backend setup plan" below). Waiting on the user to provision a Supabase project and register the MCP locally.
+Steps 1–4 of the backend setup plan are done. App is live at <https://montaj-psi.vercel.app> with auth, per-user persistence, autosave, and a working dashboard. See `summary.md` for the session log.
 
-**What the user is doing offline:**
-1. Create new Supabase project at https://supabase.com/dashboard/new (name `montaj`).
-2. Copy the project ref (the 20-char segment in `dashboard/project/<REF>` or **Project Settings → General → Reference ID**).
-3. Run `claude mcp add supabase --transport http "https://mcp.supabase.com/mcp?project_ref=<REF>"`, then `/exit` and re-launch `claude` from `/Users/claudea/projects/montaj` so the supabase MCP tools load.
-4. From **Project Settings → API**, copy **Project URL** and **anon public** key into `.env.local`:
-   ```
-   NEXT_PUBLIC_SUPABASE_URL=...
-   NEXT_PUBLIC_SUPABASE_ANON_KEY=...
-   NEXT_PUBLIC_SUPABASE_BUCKET=montaj-media
-   ```
-5. Verify `.gitignore` covers `.env.local` (it should — never read or commit env files; see repo-root `CLAUDE.md` security rules).
+**Where things stand:**
+- Clerk + Supabase third-party-auth integration is live (April 2025 pattern).
+- Schema: `projects` + `assets` tables with RLS scoped on `auth.jwt()->>'sub'`.
+- Storage RLS on `montaj-media` keyed by path prefix `{user_id}/`.
+- 15 s client-side autosave writes `projects.document` directly.
+- Asset library persists per project; signed URLs rebuild on load.
+- Vercel auto-deploys on push to `main`.
 
-**What I do when they return and say "step 1 done":**
-1. `claude mcp list | grep supabase` — confirm the MCP is registered.
-2. Call `mcp__supabase__authenticate` and complete the auth flow if needed.
-3. Verify access: list buckets, list `auth.users` table, list public schema — all should respond without errors.
-4. Once verified, mark Task #23 complete and start Task #24 (Step 2 — Clerk).
+**Active issue:** video-on-reload error is improved but still flaky — see "Active issue" below.
 
-**Do not start Step 2 (Clerk) or Step 4 (Vercel) until Step 1 is verified working.** The user was explicit about this ordering — see the "Backend Setup Requirements" message they sent.
+## Backend setup plan (status)
 
-## Backend setup plan (4 ordered steps)
+### Step 1 — Supabase MCP ✅
 
-The user pinned this ordering. Don't reorder.
+Authenticated; bucket `montaj-media` created (private); RLS verified via advisors.
 
-### Step 1 — Supabase MCP (in progress, see Resume here above)
+### Step 2 — Clerk auth ✅
 
-Goal: Claude can read schema, storage buckets, auth tables, and project env vars via the Supabase MCP. Project credentials wired into `.env.local`.
+`@clerk/nextjs` installed. `<ClerkProvider>` in root layout. `src/middleware.ts` protects everything except `/sign-{in,up}` and the public API routes. `useSession`-based browser client in `src/lib/supabase-browser.ts` and `auth().getToken()`-based server client in `src/lib/supabase-server.ts`. Sign-in / sign-up pages mounted under `src/app/sign-{in,up}/[[...rest]]/page.tsx`.
 
-### Step 2 — Clerk auth (blocked on Step 1)
+### Step 3 — Schema ✅ *(simplified)*
 
-Goal: Clerk + native Supabase third-party-auth integration (April 2025 pattern; **NOT** the deprecated JWT-template approach). The repo-root `CLAUDE.md` has the exact dashboard setup steps and client/server code patterns — follow those.
+Original PRD specified immutable timeline versions + asset versions. User explicitly chose the minimal cut on 2026-05-12: "we can add the versions later". Final schema is **two tables**:
 
-- Dashboard wiring: Clerk **Activate Supabase integration** → copy Clerk domain → Supabase **Authentication > Sign In/Up → Add provider → Clerk** → paste domain.
-- Auth features: email/password sign-in, Google OAuth, persistent sessions, route protection via Clerk middleware.
-- RLS policies use `(select auth.jwt()->>'sub') = (user_id)::text` with `to authenticated`.
-- Code: replace the unauthed Supabase client in `src/lib/media.ts` with one that calls `session.getToken()` for `accessToken` (client-side) and `(await auth()).getToken()` (server-side).
-- Each user gets isolated access via RLS — no app-level filtering on `user_id` should be needed once policies are in place.
+- `public.projects` — `id uuid, user_id text, name, document jsonb, document_updated_at, created_at, updated_at`. `document` holds the full timeline state (`timeline`, `selectedTrackId`, `targetSeconds`). `updated_at` is maintained by trigger `touch_updated_at` (with `SET search_path = public`).
+- `public.assets` — `id uuid, user_id text, project_id uuid (cascade), kind, name, size_bytes, storage_path, duration_seconds, width, height, metadata, created_at`.
 
-### Step 3 — Project + storage schema (blocked on Step 2)
+RLS on both: `(select auth.jwt()->>'sub') = user_id`, `to authenticated`, all four verbs (select/insert/update/delete). Storage RLS on `storage.objects` requires `(storage.foldername(name))[1] = (select auth.jwt()->>'sub')`.
 
-Goal: auto-saved per-user projects with media + timeline state.
+Path convention for uploads: `montaj-media/{user_id}/{project_id}/{uuid}-{safeName}`.
 
-Tables (all with RLS `user_id = auth.jwt()->>'sub'`, `to authenticated`):
-- `profiles` — Clerk user id, display name, created_at.
-- `projects` — id, owner, title, status (draft|finalized), updated_at, target_seconds, selected_track_id.
-- `assets` — id, project_id, kind (image|video), src (storage path), duration_seconds, name, size.
-- `timelines` — id, project_id, slots jsonb (`[{asset_id, beats, video_start_beats, caption}]`), revision.
-- `exports` — id, project_id, status, output_url, started_at, finished_at.
+**What was intentionally not built** (deferred until concrete need):
+- `timeline_versions` / `asset_versions` tables.
+- Server-side autosave route — autosave is a 15 s client interval calling `update projects set document=…`.
+- Railway workers — discussed but no concrete workload yet.
 
-Storage buckets:
-- `montaj-media` (already in `.env.example`) — raw uploads.
-- `montaj-exports` — rendered MP4s.
+### Step 4 — Vercel deploy ✅
 
-Auto-save: debounced `setTimeline` writes a new `timelines` row (or updates the latest, depending on whether we want revision history). Recommend keeping the last 5 revisions per project so users can recover drafts.
+Project: **claudea24s-projects/montaj**. Live URL: <https://montaj-psi.vercel.app>. 5 env vars set in Vercel (Production + Preview); `CLERK_SECRET_KEY` is Sensitive. GitHub auto-deploy connected. Clerk is still on **dev keys** — swap to production before a real launch and add `montaj-psi.vercel.app` to Clerk allowed origins.
 
-### Step 4 — Vercel deploy (blocked on Step 3)
-
-Only deploy after the local app works end-to-end with auth + persistence.
-
-- Env vars in Vercel dashboard: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_SUPABASE_BUCKET`, Clerk publishable + secret keys.
-- ffmpeg routes (`/api/transcode-video`) need bumped memory + `maxDuration` (already 120s in code). Confirm Vercel Pro plan limits accommodate.
-- 250 MB upload cap stays. For larger files use direct-to-Supabase-Storage uploads with signed URLs (skip the Next.js route entirely).
-- Verify HEVC transcode works on Vercel's Linux: Vercel doesn't ship ffmpeg by default — use `@ffmpeg-installer/ffmpeg` as a dep or switch to Vercel's image of choice (or move transcode to a Supabase Edge Function / external worker).
+**Vercel ffmpeg gap:** `/api/transcode-video` will 500 on HEVC uploads in production. Fix when needed: add `@ffmpeg-installer/ffmpeg` (smallest), use `ffmpeg.wasm` client-side (medium), or move to a Railway worker (proper long-term).
 
 ## Repo facts
 
 - **Framework:** Next.js 16 App Router, Tailwind 4, TypeScript.
+- **Auth:** Clerk (`@clerk/nextjs`). Identity is the Clerk userId (`auth.jwt()->>'sub'`); there are no Supabase auth users.
+- **Backend:** Supabase (`uxvqnlfeghyxgxffiukz`). Browser uses `useSupabaseClient()` from `src/lib/supabase-browser.ts`; server routes use `createServerSupabaseClient()` from `src/lib/supabase-server.ts`.
+- **Storage:** private bucket `montaj-media`; signed URLs (24 h TTL) are minted via `createSignedUrls` on project load.
+- **Autosave:** 15 s client interval; flips dirty when `timeline` / `selectedTrack` / `targetSeconds` changes. Save badge in top-right toolbar.
 - **Video engine:** Remotion 4.0.457 — `remotion`, `@remotion/player`, `@remotion/transitions` are all pinned to that minor. Do not bump only one of them; that produces two parallel `remotion` packages and breaks the player context at runtime.
 - **AI selection:** runs through `scripts/analyze.sh`, which spawns `claude -p` headless with `--system-prompt`, `--json-schema`, `--allowedTools Read`, and `--dangerously-skip-permissions`. The Next.js route at `src/app/api/analyze/route.ts` decodes incoming data URLs to a temp dir, spawns the bash script, and parses `structured_output`. There is no OpenAI dependency.
-- **HEVC transcode:** every video upload posts to `POST /api/transcode-video`. The route streams the file to `/tmp/montaj-transcode-*`, ffprobes it, returns `204 No Content` for H.264 inputs, and otherwise transcodes via `ffmpeg -c:v libx264 -vf scale=1280 -r 30 -crf 23 -g 30 -keyint_min 30 -sc_threshold 0 -movflags +faststart -c:a aac`. Server-side `ffmpeg` + `ffprobe` must be on `PATH` (`brew install ffmpeg` on macOS). 250 MB input cap; 120 s `maxDuration`.
+- **HEVC transcode:** every video upload posts to `POST /api/transcode-video`. The route streams the file to `/tmp/montaj-transcode-*`, ffprobes it, returns `204 No Content` for H.264 inputs, and otherwise transcodes via `ffmpeg -c:v libx264 -vf scale=1280 -r 30 -crf 23 -g 30 -keyint_min 30 -sc_threshold 0 -movflags +faststart -c:a aac`. Server-side `ffmpeg` + `ffprobe` must be on `PATH` (`brew install ffmpeg` on macOS). 250 MB input cap; 120 s `maxDuration`. **Vercel does not ship ffmpeg** — see Step 4.
 - **Music tracks:** seven 24-s loops in `public/music/*.wav`. Regenerate with `node scripts/gen-music.mjs` (procedural kick + pad + hat synth at four BPMs).
 - **Dev server:** `PORT=3737 npm run dev`. Type-check / lint: `npx tsc --noEmit && npm run lint`.
 
 ## Conventions
 
+- **RLS pattern:** every table has `user_id text` and policies `(select auth.jwt()->>'sub') = user_id` with `to authenticated`. Storage policies use `(storage.foldername(name))[1] = (select auth.jwt()->>'sub')`. When adding new tables, mirror this exactly.
+- **Upload path:** `{user_id}/{project_id}/{uuid}-{safeName}` (special chars in name are replaced with `_`). The path is what's saved in `assets.storage_path`.
+- **Library → timeline drag clones, doesn't move.** Library is a palette that persists; timeline copies use a fresh `crypto.randomUUID()` so the same asset can appear multiple times.
+- **TimelineMedia.src on load:** must be resolved from `storagePath` via signed URLs. `resolveTimelineMediaUrls()` does this on project open; items with stale `blob:` URLs and no `storagePath` are dropped (Remotion's `<Video>` crashes on them).
+- **Save state:** `dirtyRef` flips on any `timeline`/`selectedTrack`/`targetSeconds` change after project load. The autosave interval reads-then-clears `dirtyRef`; if the write fails, `dirtyRef` is set back to true so the next tick retries.
 - **Beat math:** `beatPeriodSeconds = 60 / bpm`. Reel total = `sum(perSlotFrames) − sum(transitionOverlaps)`. Transition overlap = `max(2, min(prevSlotFrames/2, nextSlotFrames/2, TRANSITION_FRAMES))`.
 - **Per-clip state:** every `TimelineMedia` carries `beats`. Videos additionally carry `videoStartBeats` (head trim). The cap is `floor(durationSeconds / beatPeriodSeconds)`. The `setTrim(id, startBeats, beats)` handler is the single source of truth — don't update `beats` and `videoStartBeats` separately.
 - **Player composition length:** `durationInFrames = timeline.length === 0 ? FPS * 5 : Math.max(totalFrames, 1)`. Don't pad with `Math.max(totalFrames, FPS * 5)` — that re-introduces the static-tail-frame bug at end of short reels.
@@ -93,83 +80,99 @@ Only deploy after the local app works end-to-end with auth + persistence.
 
 ## Active issue
 
-None currently. **Trim stutter on HEVC clips** is fully resolved. The slot now uses a plain `<Video>` with `trimBefore` for both trimmed and untrimmed clips, with no preview-frame fallback. Root cause was a competition for the video-decode pipeline: an in-browser preview-frame extractor (a hidden `<video>` cycling through 180 seek-decode-canvas operations) ran in parallel with the Remotion Player's native `<Video>`. Both fed off the same decoder, and the player visibly stalled.
+**"Error occurred in video {}" on project reload — partial fix, still flaky.**
 
-Resolution (in order applied):
-1. Switched the preview-frame `<Img>` sequence to a native `<img>` — Remotion's `<Img>` calls `delayRender()` on every `src` change, which froze the Player when preview frames swapped at ~8 fps inside a 30 fps Player. That got the Img path advancing but at half quality.
-2. Tested whether native `<Video trimBefore>` would now run smoothly with no preview-frame extractor running in parallel — yes. 63% real-time rate in headless Chrome (matches the no-trim baseline of 59% in the same environment), zero stalls. Real browsers with GPU should hit 100%.
-3. Deleted the entire preview-frame path: `extractVideoPreviewFrames` and its types in `src/lib/media.ts`, the eager-extraction `useEffect` in `montaj-week-one.tsx`, and the `<img>` branch in `slideshow-composition.tsx`. Slot now always renders `<Video src trimBefore?>` at full source quality.
+Symptom: Remotion's `<Video>` errors with an empty `{}` payload after opening a project that was saved in a prior session. Root cause was stale `blob:` URLs in the persisted `document.timeline` — those URLs are revoked when the page reloads.
 
-Reproduction (kept for regression testing): `tmp-demo/hevc/IMG_1801.MOV` (20 s, 1920×1080, HEVC, AAC). Drag the clip from the library list onto the rail, drag left edge to set head-trim ~3 s, click play. Playhead advances at real-time speed at full 720 p H.264 quality (the transcoded preview).
+Fix applied:
+1. Every upload now writes `assets` row + sets `storagePath` on the `TimelineMedia`.
+2. `resolveTimelineMediaUrls()` in `src/lib/media.ts` rebuilds signed URLs from `storagePath` when a project loads.
+3. Items with no `storagePath` and only a stale `blob:` src are dropped from the timeline at load time.
 
-A secondary minor issue: the soundtrack loop seam at 24 s is faintly audible on short reels. The user accepted it for now; longer tracks dilute it. Crossfading the loop point in `scripts/gen-music.mjs` is a one-bar fix when desired.
+**Status: improved but still surfaces.** Suspected remaining cases:
+- Projects edited before `storagePath` existed (older documents).
+- Signed URL expiring mid-session (24 h TTL, but long edits could exceed).
+- Race when the loader resolves URLs before Supabase auth token is ready (the `useEffect` depends on `supabase` which depends on `useSession` — there might be a window).
 
-## Next steps (ordered)
+To investigate next: open the editor, watch the network tab for any `montaj-media` request returning 4xx, and instrument `resolveTimelineMediaUrls` to log which items it drops.
 
-Do them in this order — earlier steps reduce risk for later ones, and the trim-stutter fix has to come before any new feature lands or we'll be debugging two regressions instead of one.
+## Next steps — Sprint Backlog
 
-### 1. Smart video trim — AI picks the right window
+Phased and prioritized. Check items off as they ship.
 
-**Goal:** for each uploaded video, automatically choose `videoStartBeats` and `beats` so the active range lands on the stable, scenic part instead of camera shake or transitions.
+### 🔴 Phase 1: Stability & Security (critical path)
 
-**Approach (lightweight, no new model deploy):**
-- Server route `POST /api/trim-suggest` accepts `{ videoPath, durationSeconds, beatPeriodSeconds, maxReelSeconds }`.
-- On the server, run `ffmpeg` to:
-  - Sample ~8 frames evenly across the clip → tiny JPEGs in a temp dir.
-  - Compute a **stability score per window** via `ffmpeg -vf "select='gt(scene,0.3)'"` (scene-cut count) and a basic motion magnitude via `ffmpeg -vf vidstabdetect` (or just inter-frame diff via the `bmovie` / `tblend` filter — pick whichever ships with the system FFmpeg).
-- Send the 8 sampled frames to `claude -p` (reuse `scripts/analyze.sh` pattern, new prompt) asking: "Which 1–2 second window shows the most beautiful, stable scenery? Return `{ startSeconds, endSeconds }`."
-- Combine: stability score gates "is this window even watchable", AI vision picks "is this window beautiful". Pick the highest combined score, snap to beats, set `videoStartBeats` and `beats`.
-- **Files to touch:**
-  - new `src/app/api/trim-suggest/route.ts`
-  - new `scripts/trim-suggest.sh` (analogous to `scripts/analyze.sh`)
-  - `src/components/montaj-week-one.tsx` — add a "Smart trim" button per video clip, or auto-call after upload
-  - `src/lib/ai.ts` — add `TrimSuggestion` type
-- **Gotchas:**
-  - ffmpeg is already required for `/api/transcode-video`; no new dependency.
-  - For HEVC inputs, sample frames from the *transcoded* H.264 file, not the original — the transcode route already produced one and the path could be passed through.
-  - Cap input video size — refuse anything > 200 MB to keep temp dirs sane (mirrors the transcode cap of 250 MB).
-  - Don't block upload on trim suggestion — run it as a background `Promise` and patch `videoStartBeats` / `beats` when it returns.
+**Goal:** stop the crashes and lock down the data.
 
-### 2. AI picks reel timing — music length matched to content
+- [ ] **Debug "Video {}" reload error**
+  - [ ] Add a loading state to the timeline (`isResolving`) so Remotion doesn't mount stale `blob:` URLs before `resolveTimelineMediaUrls()` completes.
+  - [ ] Implement a fallback for "legacy" assets that might be missing a `storagePath`.
+  - [ ] Add a `URL.revokeObjectURL()` cleanup routine to prevent memory leaks during long sessions.
+- [ ] **Address security audit findings**
+  - [ ] Review `security_audit_report.md` and commit or delete the untracked file.
+  - [ ] **Production auth:** swap Clerk to production keys and restrict allowed origins to `montaj-psi.vercel.app`.
+  - [ ] **Database hardening:** verify RLS policies specifically for the `assets` table to ensure users can't "guess" other users' asset IDs.
 
-**Goal:** instead of the user setting a 8–30 s target by hand, the *Auto-fit* button asks AI for the right length given the clip count, content, and music BPM.
+### 🟠 Phase 2: Core editing suite (feature parity)
 
-**Approach:**
-- Extend `/api/analyze`'s response with `suggestedReelSeconds: number`. The prompt already knows clip count and scene tags; add a sentence: "Suggest a reel length 8–30 s, biased toward 12 s for ≤6 clips, 18 s for 7–10 clips, 25 s for >10 clips, but bend it for the content."
-- After analysis, set `targetSeconds = result.suggestedReelSeconds` and invoke `autoFit()`.
-- Optionally: also ask the AI for a per-clip beat suggestion (returns `slotBeats: number[]`) so high-impact moments (climax, sunset) get more beats than filler. This biases away from `Auto-fit`'s uniform distribution.
-- **Files to touch:** `scripts/analyze.sh` (prompt + JSON schema), `src/app/api/analyze/route.ts` (response shape), `src/lib/ai.ts` (`AnalysisResult`), `src/components/montaj-week-one.tsx` (apply suggestion).
-- **Gotcha:** keep `targetSeconds` user-editable after the suggestion lands — don't lock the slider.
+**Goal:** turn the "player" into a "creator."
 
-### 3. yt-dlp trending music — paste a URL, fit it to the reel
+- [ ] **Text editing engine**
+  - [ ] Update `projects.document` JSONB schema to support text layers (font, size, color, position).
+  - [ ] Build a "Text" tab in LeftNav with drag-to-timeline functionality.
+- [ ] **Transitions library**
+  - [ ] Integrate `@remotion/transitions` (already a dep — extend the active cycle).
+  - [ ] Build logic to handle frame-overlap between clips for fades and wipes.
+- [ ] **Emoji & stickers**
+  - [ ] Implement an SVG-based emoji picker in LeftNav.
+  - [ ] Add "Transform" controls (scale / rotate) for emojis on the timeline.
 
-**Goal:** user pastes a reel / TikTok / YouTube Short URL → the audio is fetched, beat-detected, and trimmed to match the current reel length.
+### 🟡 Phase 3: Infrastructure & AI (stretch)
 
-**Approach:**
-- Server route `POST /api/fetch-audio` accepts `{ url }` and returns `{ audioPath, durationSeconds, originalUrl }`.
-- Spawn `yt-dlp -x --audio-format wav -o /tmp/montaj-audio/<uuid>.wav <url>`.
-- Probe duration (`ffprobe`), respond with the file path. Move it under `public/music/fetched/` so the existing `<audio>` element can play it without auth.
-- New UI section in the Soundtrack panel: "Paste a URL". Show a TOS-aware warning per the proposal (yt-dlp violates platform ToS; the fetched audio is used for beat detection / preview only and never embedded in the export). Fall back to a manual file upload control if the fetch fails.
-- After fetch:
-  - Add the track to `MUSIC_LIBRARY` in memory (not on disk persistently — clean up on page reload or via a periodic cron in `/tmp`).
-  - Re-run `detectBeats(track.src)` to populate the beat grid.
-  - Optionally trim the audio to `reelTotalSeconds` via `ffmpeg -t` so the loop boundary lands cleanly.
-- **Files to touch:**
-  - new `src/app/api/fetch-audio/route.ts`
-  - `src/lib/media.ts` — extend `MusicTrack` with `originalUrl` + a "fetched" flag for UI distinction
-  - `src/components/montaj-week-one.tsx` — URL input + paste handler in the Soundtrack section
-- **Gotchas:**
-  - `yt-dlp` must be on `PATH`; document install in this file (`brew install yt-dlp` on macOS).
-  - Some platforms (TikTok especially) periodically break yt-dlp; expect failures, surface them clearly, keep manual upload as the fallback.
-  - Don't persist downloaded audio in git or a CDN — it's stored under `/tmp` or `public/music/fetched/` (gitignored).
-  - Export must be **video-only** when the source is fetched audio (per Option A of the proposal). Tag the track with a flag and skip embedding in render.
+**Goal:** scale up and add the "magic."
 
-### 4. Remaining Week 4 work
+- [ ] **Infrastructure migration**
+  - [ ] Move video processing / transcoding to Railway to bypass Vercel's FFmpeg limitations.
+- [ ] **AI asset enrichment**
+  - [ ] Implement auto-captioning (Speech-to-Text) via OpenAI Whisper or similar.
+  - [ ] Add "Smart Search" for the library using AI-generated tags for uploaded clips.
 
-- **MP4 export** — Remotion `@remotion/renderer` server route, with a "video-only" branch when the soundtrack is yt-dlp-fetched. Note: the slot uses `<Video>` for preview smoothness; renderer mode honors that, but if fidelity issues appear, swapping to `<OffthreadVideo>` for render only (via `getRemotionEnvironment().isRendering`) is a documented escape hatch.
-- **Natural-language AI refinement** — "make the intro faster", "swap clip 3 for a wider shot". Single `/api/refine` endpoint that takes the current timeline + a prompt and returns a patch (reorders, beat changes, swaps).
-- **Vibe / mood selector** — text → biases AI selection prompts (`scripts/analyze.sh`) and editing pace.
-- **Live Supabase + Clerk + Vercel provisioning** — see the "Backend setup plan" section near the top of this file. That work supersedes whatever's left here.
+### 🚀 Quick-Start for Tomorrow
+
+- **The fix:** wrap the editor in an `isResolving` boolean to ensure `resolveTimelineMediaUrls()` finishes before the video tries to play.
+- **The cleanup:** finalize `security_audit_report.md` — it's the only thing sitting outside git history.
+
+## Backlog — not on current sprint (reference)
+
+Deprioritized but kept here so they're not lost. Re-promote into the sprint when relevant.
+
+### Library thumbnails for loaded assets
+
+`extractVideoThumbnails` runs only on fresh uploads. Loaded library items have no `previewFrames` and look blank. Either run extraction lazily on render, or store thumbnails alongside the asset row (base64 in `metadata`, or a separate `thumbnail_path` storage object).
+
+### Smart video trim — AI picks the right window
+
+For each uploaded video, automatically choose `videoStartBeats` and `beats` so the active range lands on the stable, scenic part. Server route `POST /api/trim-suggest` samples ~8 frames via ffmpeg, computes a stability score (scene-cut count + motion magnitude), and asks `claude -p` which 1–2 s window is best. Combine stability ("watchable") with AI vision ("beautiful"), snap to beats, set on the clip. New files: `src/app/api/trim-suggest/route.ts`, `scripts/trim-suggest.sh`, plus a `TrimSuggestion` type in `src/lib/ai.ts` and a "Smart trim" button in the editor.
+
+### AI picks reel timing — music length matched to content
+
+Extend `/api/analyze`'s response with `suggestedReelSeconds: number`. Prompt: "Suggest a reel length 8–30 s, biased toward 12 s for ≤6 clips, 18 s for 7–10 clips, 25 s for >10 clips, but bend for content." After analysis, set `targetSeconds` and invoke `autoFit()`. Keep the slider editable so the user can override.
+
+### yt-dlp trending music — paste a URL, fit it to the reel
+
+Server route `POST /api/fetch-audio` spawns `yt-dlp -x --audio-format wav -o /tmp/montaj-audio/<uuid>.wav <url>`, probes duration, moves under `public/music/fetched/`. Add a paste-URL section to the Soundtrack panel with a TOS warning (yt-dlp violates platform ToS; fetched audio is for preview only, never embedded in export). When source is yt-dlp-fetched, export must be **video-only**. Gotchas: `yt-dlp` on `PATH`, expect TikTok flakiness, store under `/tmp` only (gitignored).
+
+### MP4 export
+
+Remotion `@remotion/renderer` server route, with a "video-only" branch when the soundtrack is yt-dlp-fetched. The slot uses `<Video>` for preview smoothness; renderer mode honors that, but `<OffthreadVideo>` via `getRemotionEnvironment().isRendering` is the documented escape hatch if fidelity issues appear. Once export exists, provision a Railway service to run the renderer — trigger via a new `exports` table (Vercel inserts `pending` → Railway watches via Postgres LISTEN/NOTIFY → renders → uploads to `montaj-exports` bucket → updates row to `done`). This is also where HEVC transcode should move.
+
+### Natural-language AI refinement
+
+Single `/api/refine` endpoint that takes the current timeline + a prompt ("make the intro faster", "swap clip 3 for a wider shot") and returns a patch (reorders, beat changes, swaps).
+
+### Vibe / mood selector
+
+Text input → biases AI selection prompts (`scripts/analyze.sh`) and editing pace.
 
 ## Verification commands
 
@@ -194,19 +197,31 @@ curl -s -o /tmp/out.mp4 -D - -X POST \
 ffprobe -v error -select_streams v:0 \
   -show_entries packet=pts_time,flags -of csv=p=0 /tmp/out.mp4 | grep ',K'
 # expect one keyframe per second
+
+# Smoke prod
+curl -sS -D - -o /dev/null -H "Accept: text/html" https://montaj-psi.vercel.app/ | head -5
+# expect 307 → Clerk handshake
 ```
 
 ## File map
 
 | File | Purpose |
 |---|---|
-| `src/components/montaj-week-one.tsx` | Main page; owns `timeline`, `selectedTrack`, `beatGrid`, `currentFrame`. Holds `playerRef`. Computes `perSlotFrames`, `perSlotStartFrames`, `totalFrames`, `durationInFrames`. |
+| `src/app/layout.tsx` | `<ClerkProvider>` wrapper around `<html>` / `<body>`. |
+| `src/app/page.tsx` | `/` route. Renders `<MontajWeekOne projectId={null} />` (editor shell with Dashboard tool active). |
+| `src/app/projects/[id]/page.tsx` | `/projects/[id]` route. Renders `<MontajWeekOne projectId={id} />`. |
+| `src/app/sign-in/[[...rest]]/page.tsx` · `src/app/sign-up/[[...rest]]/page.tsx` | Clerk hosted forms. |
+| `src/middleware.ts` | `clerkMiddleware` with `auth.protect()` for non-public routes. Public matcher: `/sign-in*`, `/sign-up*`, `/api/transcode-video`, `/api/analyze`. |
+| `src/components/montaj-week-one.tsx` | Main editor. Owns `timeline`, `library`, `selectedTrack`, `targetSeconds`, save state, autosave loop, project loader, asset loader, dashboard panel, left nav, media panel switch. |
 | `src/components/timeline-rail.tsx` | CapCut rail. Drag handles, ghost filmstrip, beat ticks, playhead, click-to-seek. Consumes `transitionFrames` and computes overlap-aware `perSlotPlayerStartFrames`. |
-| `src/components/slideshow-composition.tsx` | Remotion composition. `<Video>` slots with conditional `trimBefore` for video front-trim, looped audio, captions, transitions. |
+| `src/components/slideshow-composition.tsx` | Remotion composition. `<Video>` slots with conditional `trimBefore`, looped audio, captions, transitions. |
 | `src/lib/beats.ts` | Web Audio onset envelope + autocorrelation BPM. Cached per-track. |
-| `src/lib/media.ts` | `TimelineMedia` type, music library, Supabase upload helper, HEIC handling, **`transcodeIfHevc`** that posts video uploads to `/api/transcode-video`. |
-| `src/app/api/analyze/route.ts` | Decodes data URLs to temp dir, spawns `scripts/analyze.sh`, parses JSON, heuristic fallback. |
-| `src/app/api/transcode-video/route.ts` | Streams uploads to `/tmp`, ffprobes codec, returns 204 if H.264, otherwise transcodes via `spawn('ffmpeg', …)` and returns `video/mp4`. 250 MB cap. |
+| `src/lib/media.ts` | `TimelineMedia` type, music library, auth-aware upload, asset row insert, `loadProjectAssets`, `resolveTimelineMediaUrls`, HEIC handling, `transcodeIfHevc`. |
+| `src/lib/projects.ts` | `projects` CRUD: `listProjects`, `createProject`, `getProject`, `updateProjectDocument`, `renameProject`, `deleteProject`. |
+| `src/lib/supabase-browser.ts` | `useSupabaseClient()` — Clerk session token via `useSession()`, memoized per session. |
+| `src/lib/supabase-server.ts` | `createServerSupabaseClient()` — `auth().getToken()` for server routes (not yet used in app code; ready when we add server data fetching). |
+| `src/app/api/analyze/route.ts` | Decodes data URLs to temp dir, spawns `scripts/analyze.sh`, parses JSON, heuristic fallback. **Public** (no Clerk gate in middleware) — abuse-able; tighten when we add quotas. |
+| `src/app/api/transcode-video/route.ts` | Streams uploads to `/tmp`, ffprobes codec, returns 204 if H.264, otherwise transcodes via `spawn('ffmpeg', …)` and returns `video/mp4`. 250 MB cap. **Public** for the same reason. |
 | `scripts/analyze.sh` | `claude -p` wrapper with strict JSON schema. Prints `structured_output`; exit 4 if absent. |
 | `scripts/gen-music.mjs` | Procedural WAV generator (kick + pad + hat) at four BPMs. |
-| `tmp-demo/hevc/` | Real iPhone HEVC clips (`.MOV`) and HEIC photos for trim-stutter reproduction. Gitignored. |
+| `tmp-demo/hevc/` | Real iPhone HEVC clips (`.MOV`) and HEIC photos for trim-stutter / reload reproduction. Gitignored. |
