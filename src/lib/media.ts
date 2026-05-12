@@ -15,6 +15,9 @@ export type TimelineMedia = {
   qualityScore?: number;
   beats?: number;
   videoStartBeats?: number;
+  /** Sparse JPEG thumbnails for static UI (library tile poster + rail filmstrip).
+   *  NOT used during playback — the slot renders the real <Video> directly. */
+  previewFrames?: string[];
 };
 
 export type MusicTrack = {
@@ -160,6 +163,80 @@ async function probeVideoDuration(blobUrl: string): Promise<number> {
     };
     video.onerror = () => resolve(0);
   });
+}
+
+const THUMBNAIL_COUNT = 12;
+const THUMBNAIL_MAX_DIMENSION = 240;
+
+function waitForEvent(
+  target: EventTarget,
+  successEvent: string,
+  errorEvent: string,
+) {
+  return new Promise<void>((resolve, reject) => {
+    const onSuccess = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error(`media event failed: ${successEvent}`));
+    };
+    const cleanup = () => {
+      target.removeEventListener(successEvent, onSuccess);
+      target.removeEventListener(errorEvent, onError);
+    };
+    target.addEventListener(successEvent, onSuccess, { once: true });
+    target.addEventListener(errorEvent, onError, { once: true });
+  });
+}
+
+async function seekVideo(video: HTMLVideoElement, t: number) {
+  if (Math.abs(video.currentTime - t) < 0.001) return;
+  const done = waitForEvent(video, "seeked", "error");
+  video.currentTime = t;
+  await done;
+}
+
+/** Pulls a small set of evenly-spaced JPEG thumbnails. Used only for static UI
+ *  decoration (library tiles, rail filmstrip) — never on the playback path. */
+export async function extractVideoThumbnails(
+  src: string,
+  durationSeconds: number,
+): Promise<string[]> {
+  const video = document.createElement("video");
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = "auto";
+  video.src = src;
+  try {
+    await waitForEvent(video, "loadedmetadata", "error");
+    const dur = Number.isFinite(video.duration) && video.duration > 0
+      ? video.duration
+      : durationSeconds;
+    if (!Number.isFinite(dur) || dur <= 0) return [];
+    const w = video.videoWidth || THUMBNAIL_MAX_DIMENSION;
+    const h = video.videoHeight || THUMBNAIL_MAX_DIMENSION;
+    const longest = Math.max(w, h);
+    const scale = longest > 0 ? Math.min(1, THUMBNAIL_MAX_DIMENSION / longest) : 1;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(2, Math.round((w * scale) / 2) * 2);
+    canvas.height = Math.max(2, Math.round((h * scale) / 2) * 2);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return [];
+    const frames: string[] = [];
+    for (let i = 0; i < THUMBNAIL_COUNT; i += 1) {
+      const t = Math.min(dur - 0.001, (i / Math.max(1, THUMBNAIL_COUNT - 1)) * dur);
+      await seekVideo(video, t);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      frames.push(canvas.toDataURL("image/jpeg", 0.6));
+    }
+    return frames;
+  } finally {
+    video.pause();
+    video.removeAttribute("src");
+    video.load();
+  }
 }
 
 type PreparedMedia = {

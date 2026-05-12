@@ -145,6 +145,7 @@ type SlotContentProps = {
 
 function SlotContent({ item, index, totalFrames, startFrom, caption }: SlotContentProps) {
   const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
   const isVideo = item.kind === "video";
   const variant = index % 4;
 
@@ -163,6 +164,11 @@ function SlotContent({ item, index, totalFrames, startFrom, caption }: SlotConte
   });
   const transform = `translate(${xPercent}%, 0) scale(${scale})`;
 
+  // Pass trimBefore only when > 0. Passing a defined 0 makes Remotion wrap
+  // the video in an extra <Sequence layout="none"> that interacts badly with
+  // TransitionSeries.
+  const videoTrimProps = startFrom > 0 ? { trimBefore: startFrom } : {};
+
   return (
     <AbsoluteFill style={{ alignItems: "center", justifyContent: "center" }}>
       {isVideo ? (
@@ -171,7 +177,7 @@ function SlotContent({ item, index, totalFrames, startFrom, caption }: SlotConte
           muted
           pauseWhenBuffering={false}
           src={item.src}
-          {...(startFrom > 0 ? { trimBefore: startFrom } : {})}
+          {...videoTrimProps}
           style={{
             width: "100%",
             height: "100%",

@@ -25,17 +25,14 @@ Project-scoped notes. The repo-root `CLAUDE.md` (one directory up) covers global
 
 ## Active issue
 
-**Trim still stutters on HEVC-sourced clips, even after the 720 p / 1-second-keyframe transcode and the `<Video>` swap.** First upload is smooth, full-length playback is smooth, but dragging the front-trim handle to set `videoStartBeats > 0` and pressing play produces visible stalls partway through. The transcoded preview is already small (720×1280, ~4 Mbps, keyframes every 30 frames), so simple decode load is unlikely to be the only culprit.
+None currently. **Trim stutter on HEVC clips** is fully resolved. The slot now uses a plain `<Video>` with `trimBefore` for both trimmed and untrimmed clips, with no preview-frame fallback. Root cause was a competition for the video-decode pipeline: an in-browser preview-frame extractor (a hidden `<video>` cycling through 180 seek-decode-canvas operations) ran in parallel with the Remotion Player's native `<Video>`. Both fed off the same decoder, and the player visibly stalled.
 
-Try in order (cheap first; stop when stutter is gone):
+Resolution (in order applied):
+1. Switched the preview-frame `<Img>` sequence to a native `<img>` — Remotion's `<Img>` calls `delayRender()` on every `src` change, which froze the Player when preview frames swapped at ~8 fps inside a 30 fps Player. That got the Img path advancing but at half quality.
+2. Tested whether native `<Video trimBefore>` would now run smoothly with no preview-frame extractor running in parallel — yes. 63% real-time rate in headless Chrome (matches the no-trim baseline of 59% in the same environment), zero stalls. Real browsers with GPU should hit 100%.
+3. Deleted the entire preview-frame path: `extractVideoPreviewFrames` and its types in `src/lib/media.ts`, the eager-extraction `useEffect` in `montaj-week-one.tsx`, and the `<img>` branch in `slideshow-composition.tsx`. Slot now always renders `<Video src trimBefore?>` at full source quality.
 
-1. **Cap preview to 480 p, lower bitrate.** In `src/app/api/transcode-video/route.ts` change the scale filter to `scale=w=720:h=720:force_original_aspect_ratio=decrease` and `-crf 28`. Re-upload an iPhone clip, trim, play.
-2. **Add `-tune fastdecode`** to the libx264 args. Disables in-loop filters and CABAC, reducing per-frame decode work.
-3. **Audit `<Video>` premount in `TransitionSeries`.** Each transition mounts the next slot ahead of time; the underlying `<video>` does its first seek-to-`trimBefore` while the previous slot is still rendering. If the seek itself is what stalls, premounting earlier (or pre-warming via a hidden `<video preload="auto" src={...}>` at upload time) could absorb the cost. Logging `mediaRef.current.readyState` over time during a trimmed-clip slot would confirm.
-4. **Try `OffthreadVideo` over the new short-keyframe transcode.** I switched away because it seek-per-frame stalled on 1080 p HEVC; on a 720 p H.264 file with 1 s keyframes, `OffthreadVideo`'s deterministic frame-pull may now beat the native pipeline.
-5. **Pre-extract frames on upload.** Last resort: `ffmpeg -vf fps=30 frame-%04d.jpg`, feed an `<Img>` sequence into the player. Slower upload, perfect playback, perfect render parity. Probably overkill but guaranteed to work.
-
-Reproduction: `tmp-demo/hevc/IMG_1801.MOV` (20 s, 1920×1080, HEVC, AAC). Drop into the page, drag left edge of the clip to set head-trim ~3 s, click play. Same file works smoothly without trim.
+Reproduction (kept for regression testing): `tmp-demo/hevc/IMG_1801.MOV` (20 s, 1920×1080, HEVC, AAC). Drag the clip from the library list onto the rail, drag left edge to set head-trim ~3 s, click play. Playhead advances at real-time speed at full 720 p H.264 quality (the transcoded preview).
 
 A secondary minor issue: the soundtrack loop seam at 24 s is faintly audible on short reels. The user accepted it for now; longer tracks dilute it. Crossfading the loop point in `scripts/gen-music.mjs` is a one-bar fix when desired.
 
@@ -43,11 +40,7 @@ A secondary minor issue: the soundtrack loop seam at 24 s is faintly audible on 
 
 Do them in this order — earlier steps reduce risk for later ones, and the trim-stutter fix has to come before any new feature lands or we'll be debugging two regressions instead of one.
 
-### 1. Fix the trim-stutter on HEVC clips (blocker)
-
-See "Active issue" above. Walk the page in Playwright with one of the `tmp-demo/hevc/*.MOV` files, screenshot, and burn through the 5 hypotheses.
-
-### 2. Smart video trim — AI picks the right window
+### 1. Smart video trim — AI picks the right window
 
 **Goal:** for each uploaded video, automatically choose `videoStartBeats` and `beats` so the active range lands on the stable, scenic part instead of camera shake or transitions.
 
@@ -69,7 +62,7 @@ See "Active issue" above. Walk the page in Playwright with one of the `tmp-demo/
   - Cap input video size — refuse anything > 200 MB to keep temp dirs sane (mirrors the transcode cap of 250 MB).
   - Don't block upload on trim suggestion — run it as a background `Promise` and patch `videoStartBeats` / `beats` when it returns.
 
-### 3. AI picks reel timing — music length matched to content
+### 2. AI picks reel timing — music length matched to content
 
 **Goal:** instead of the user setting a 8–30 s target by hand, the *Auto-fit* button asks AI for the right length given the clip count, content, and music BPM.
 
@@ -80,7 +73,7 @@ See "Active issue" above. Walk the page in Playwright with one of the `tmp-demo/
 - **Files to touch:** `scripts/analyze.sh` (prompt + JSON schema), `src/app/api/analyze/route.ts` (response shape), `src/lib/ai.ts` (`AnalysisResult`), `src/components/montaj-week-one.tsx` (apply suggestion).
 - **Gotcha:** keep `targetSeconds` user-editable after the suggestion lands — don't lock the slider.
 
-### 4. yt-dlp trending music — paste a URL, fit it to the reel
+### 3. yt-dlp trending music — paste a URL, fit it to the reel
 
 **Goal:** user pastes a reel / TikTok / YouTube Short URL → the audio is fetched, beat-detected, and trimmed to match the current reel length.
 
@@ -103,7 +96,7 @@ See "Active issue" above. Walk the page in Playwright with one of the `tmp-demo/
   - Don't persist downloaded audio in git or a CDN — it's stored under `/tmp` or `public/music/fetched/` (gitignored).
   - Export must be **video-only** when the source is fetched audio (per Option A of the proposal). Tag the track with a flag and skip embedding in render.
 
-### 5. Remaining Week 4 work
+### 4. Remaining Week 4 work
 
 - **MP4 export** — Remotion `@remotion/renderer` server route, with a "video-only" branch when the soundtrack is yt-dlp-fetched. Note: the slot uses `<Video>` for preview smoothness; renderer mode honors that, but if fidelity issues appear, swapping to `<OffthreadVideo>` for render only (via `getRemotionEnvironment().isRendering`) is a documented escape hatch.
 - **Natural-language AI refinement** — "make the intro faster", "swap clip 3 for a wider shot". Single `/api/refine` endpoint that takes the current timeline + a prompt and returns a patch (reorders, beat changes, swaps).

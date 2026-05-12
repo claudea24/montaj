@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   DndContext,
   PointerSensor,
@@ -18,11 +18,14 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import type { TimelineMedia } from "@/lib/media";
 
-const PX_PER_BEAT = 44;
+const PX_PER_BEAT_MAX = 44;
+const PX_PER_BEAT_MIN = 8;
 const MIN_BEATS = 1;
 const MIN_REEL_SECONDS = 8;
 const MAX_REEL_SECONDS = 30;
 const RAIL_PADDING_X = 16;
+
+export const LIBRARY_DRAG_MIME = "application/x-montaj-library-id";
 
 export type TimelineRailProps = {
   timeline: TimelineMedia[];
@@ -40,6 +43,7 @@ export type TimelineRailProps = {
   onAutoFit: () => void;
   targetSeconds: number;
   onTargetSecondsChange: (seconds: number) => void;
+  onLibraryDrop: (libraryId: string, atIndex: number) => void;
 };
 
 export function TimelineRail({
@@ -58,11 +62,67 @@ export function TimelineRail({
   onAutoFit,
   targetSeconds,
   onTargetSecondsChange,
+  onLibraryDrop,
 }: TimelineRailProps) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
   );
   const trackRef = useRef<HTMLDivElement>(null);
+  const clipsRowRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [drop, setDrop] = useState<{ index: number; leftPx: number } | null>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    setContainerWidth(el.clientWidth);
+    const ro = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect.width ?? el.clientWidth;
+      setContainerWidth(w);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  function computeDrop(clientX: number): { index: number; leftPx: number } {
+    const row = clipsRowRef.current;
+    if (!row) return { index: timeline.length, leftPx: 0 };
+    const children = Array.from(row.children).filter(
+      (c): c is HTMLElement =>
+        c instanceof HTMLElement && !c.dataset.dropIndicator,
+    );
+    if (children.length === 0) return { index: 0, leftPx: 0 };
+    for (let i = 0; i < children.length; i += 1) {
+      const rect = children[i].getBoundingClientRect();
+      if (clientX < rect.left + rect.width / 2) {
+        return { index: i, leftPx: children[i].offsetLeft };
+      }
+    }
+    const last = children[children.length - 1];
+    return { index: children.length, leftPx: last.offsetLeft + last.offsetWidth };
+  }
+
+  function handleDragOverRail(e: React.DragEvent<HTMLDivElement>) {
+    if (!e.dataTransfer.types.includes(LIBRARY_DRAG_MIME)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    setDrop(computeDrop(e.clientX));
+  }
+
+  function handleDragLeaveRail(e: React.DragEvent<HTMLDivElement>) {
+    if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+    setDrop(null);
+  }
+
+  function handleDropRail(e: React.DragEvent<HTMLDivElement>) {
+    const libraryId = e.dataTransfer.getData(LIBRARY_DRAG_MIME);
+    if (!libraryId) return;
+    e.preventDefault();
+    const { index } = computeDrop(e.clientX);
+    setDrop(null);
+    onLibraryDrop(libraryId, index);
+  }
 
   const { totalSeconds, totalBeats, beatsCommitted } = useMemo(() => {
     if (!beatPeriodSeconds) {
@@ -113,7 +173,18 @@ export function TimelineRail({
         ? "over"
         : "ok";
 
-  const railWidthPx = Math.max(totalBeats, 1) * PX_PER_BEAT;
+  // Compute px-per-beat so the clip row fits the container without scrolling.
+  // Falls back to the max value when content fits naturally; floors to the min
+  // so trim handles stay reachable.
+  const pxPerBeat = useMemo(() => {
+    if (totalBeats <= 0) return PX_PER_BEAT_MAX;
+    const available = Math.max(0, containerWidth - RAIL_PADDING_X * 2);
+    if (available === 0) return PX_PER_BEAT_MAX;
+    const fit = available / totalBeats;
+    return Math.max(PX_PER_BEAT_MIN, Math.min(PX_PER_BEAT_MAX, fit));
+  }, [containerWidth, totalBeats]);
+
+  const railWidthPx = Math.max(totalBeats, 1) * pxPerBeat;
 
   const playheadPx = useMemo(() => {
     if (timeline.length === 0 || totalDurationFrames <= 0) return 0;
@@ -124,7 +195,7 @@ export function TimelineRail({
         (item?.kind === "video" && item?.durationSeconds && beatPeriodSeconds
           ? Math.max(1, Math.floor(item.durationSeconds / beatPeriodSeconds))
           : 2);
-      return beats * PX_PER_BEAT;
+      return beats * pxPerBeat;
     });
     let pxAcc = 0;
     for (let i = 0; i < perSlotFrames.length; i += 1) {
@@ -143,6 +214,7 @@ export function TimelineRail({
     perSlotPlayerStartFrames,
     timeline,
     beatPeriodSeconds,
+    pxPerBeat,
     railWidthPx,
     totalDurationFrames,
   ]);
@@ -172,7 +244,7 @@ export function TimelineRail({
         (item.kind === "video" && item.durationSeconds && beatPeriodSeconds
           ? Math.max(1, Math.floor(item.durationSeconds / beatPeriodSeconds))
           : 2);
-      const slotPx = beats * PX_PER_BEAT;
+      const slotPx = beats * pxPerBeat;
       if (xInRail < pxAcc + slotPx) {
         const within = (xInRail - pxAcc) / slotPx;
         const start = perSlotPlayerStartFrames[i] ?? 0;
@@ -185,10 +257,33 @@ export function TimelineRail({
   }
 
   if (timeline.length === 0) {
+    const isHovering = drop !== null;
     return (
-      <div className="rounded-[24px] border border-dashed border-[var(--line)] bg-white/40 px-6 py-10 text-center text-sm leading-6 text-[var(--muted)]">
-        Drop photos and clips above. They&apos;ll appear here as draggable beat-locked
-        blocks.
+      <div
+        className={`rounded-[24px] border-2 border-dashed px-6 py-10 text-center text-sm leading-6 transition ${
+          isHovering
+            ? "border-[var(--accent)] bg-[#eef9f7] text-[var(--accent-strong)]"
+            : "border-[var(--line)] bg-white/40 text-[var(--muted)]"
+        }`}
+        onDragOver={(e) => {
+          if (!e.dataTransfer.types.includes(LIBRARY_DRAG_MIME)) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = "move";
+          setDrop({ index: 0, leftPx: 0 });
+        }}
+        onDragLeave={(e) => {
+          if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+          setDrop(null);
+        }}
+        onDrop={(e) => {
+          const libraryId = e.dataTransfer.getData(LIBRARY_DRAG_MIME);
+          if (!libraryId) return;
+          e.preventDefault();
+          setDrop(null);
+          onLibraryDrop(libraryId, 0);
+        }}
+      >
+        {isHovering ? "Drop to add to the reel" : "Drag clips here from the upload list to start your reel."}
       </div>
     );
   }
@@ -202,9 +297,6 @@ export function TimelineRail({
           </span>
           <span className="text-[var(--muted)]">
             ({totalBeats} beats · target {targetSeconds}s)
-          </span>
-          <span className="font-mono text-xs text-[var(--muted)]">
-            ▶ {(currentFrame / fps).toFixed(2)}s
           </span>
           {clamp === "under" ? (
             <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">
@@ -244,7 +336,11 @@ export function TimelineRail({
       </div>
 
       <div
-        className="overflow-x-auto rounded-[24px] border border-white/5 bg-[#0f172a] p-4"
+        className="overflow-hidden rounded-[24px] border border-white/5 bg-[#0f172a] p-4"
+        onDragLeave={handleDragLeaveRail}
+        onDragOver={handleDragOverRail}
+        onDrop={handleDropRail}
+        ref={containerRef}
         style={{ paddingLeft: RAIL_PADDING_X, paddingRight: RAIL_PADDING_X }}
       >
         {beatPeriodSeconds ? (
@@ -252,10 +348,11 @@ export function TimelineRail({
             className="relative cursor-pointer"
             onClick={handleRailClick}
             ref={trackRef}
-            style={{ minWidth: `${railWidthPx}px` }}
+            style={{ width: `${railWidthPx}px`, maxWidth: "100%" }}
           >
             <BeatTickRail
               beatPeriodSeconds={beatPeriodSeconds}
+              pxPerBeat={pxPerBeat}
               totalBeats={totalBeats || 1}
             />
 
@@ -269,9 +366,10 @@ export function TimelineRail({
                 strategy={horizontalListSortingStrategy}
               >
                 <div
-                  className="mt-2 flex gap-1"
+                  className="relative mt-2 flex gap-1"
+                  ref={clipsRowRef}
                   style={{
-                    minWidth: beatsCommitted ? `${railWidthPx}px` : undefined,
+                    width: beatsCommitted ? `${railWidthPx}px` : undefined,
                   }}
                 >
                   {timeline.map((item, index) => (
@@ -280,12 +378,13 @@ export function TimelineRail({
                       index={index}
                       item={item}
                       key={item.id}
-                      onCaptionChange={onCaptionChange}
                       onRemove={onRemove}
                       onSetTrim={onSetTrim}
+                      pxPerBeat={pxPerBeat}
                       totalSecondsClamp={clamp}
                     />
                   ))}
+                  {drop !== null ? <DropIndicator leftPx={drop.leftPx} /> : null}
                 </div>
               </SortableContext>
             </DndContext>
@@ -310,31 +409,37 @@ export function TimelineRail({
 type BeatTickRailProps = {
   totalBeats: number;
   beatPeriodSeconds: number;
+  pxPerBeat: number;
 };
 
-function BeatTickRail({ totalBeats, beatPeriodSeconds }: BeatTickRailProps) {
+function BeatTickRail({ totalBeats, beatPeriodSeconds, pxPerBeat }: BeatTickRailProps) {
+  // Skip labels when they'd overlap (small pxPerBeat). Show every Nth beat.
+  const labelEveryN = Math.max(4, Math.ceil(40 / pxPerBeat));
   const ticks = Array.from({ length: totalBeats + 1 }, (_, i) => i);
   return (
     <div
       className="relative h-6 select-none border-b border-white/10"
-      style={{ width: `${totalBeats * PX_PER_BEAT}px` }}
+      style={{ width: `${totalBeats * pxPerBeat}px` }}
     >
-      {ticks.map((i) => (
-        <div
-          key={i}
-          className="absolute top-0 bottom-0 flex flex-col items-center"
-          style={{ left: `${i * PX_PER_BEAT}px`, transform: "translateX(-50%)" }}
-        >
+      {ticks.map((i) => {
+        const isLabel = i % labelEveryN === 0;
+        return (
           <div
-            className={`w-px ${i % 4 === 0 ? "h-5 bg-emerald-300" : "h-3 bg-white/30"}`}
-          />
-          {i % 4 === 0 ? (
-            <span className="mt-0.5 text-[10px] font-mono text-emerald-300/80">
-              {(i * beatPeriodSeconds).toFixed(1)}s
-            </span>
-          ) : null}
-        </div>
-      ))}
+            key={i}
+            className="absolute top-0 bottom-0 flex flex-col items-center"
+            style={{ left: `${i * pxPerBeat}px`, transform: "translateX(-50%)" }}
+          >
+            <div
+              className={`w-px ${isLabel ? "h-5 bg-emerald-300" : "h-3 bg-white/30"}`}
+            />
+            {isLabel ? (
+              <span className="mt-0.5 text-[10px] font-mono text-emerald-300/80">
+                {(i * beatPeriodSeconds).toFixed(1)}s
+              </span>
+            ) : null}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -346,7 +451,7 @@ type SortableClipProps = {
   totalSecondsClamp: "under" | "ok" | "over";
   onSetTrim: (id: string, startBeats: number, beats: number) => void;
   onRemove: (id: string) => void;
-  onCaptionChange: (id: string, text: string) => void;
+  pxPerBeat: number;
 };
 
 function maxBeatsFor(
@@ -365,7 +470,7 @@ function SortableClip({
   totalSecondsClamp,
   onSetTrim,
   onRemove,
-  onCaptionChange,
+  pxPerBeat,
 }: SortableClipProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: item.id });
@@ -376,8 +481,7 @@ function SortableClip({
       ? Math.max(1, Math.floor(item.durationSeconds / beatPeriodSeconds))
       : 2);
   const videoStartBeats = item.kind === "video" ? item.videoStartBeats ?? 0 : 0;
-  const seconds = beatPeriodSeconds ? beats * beatPeriodSeconds : null;
-  const widthPx = Math.max(72, beats * PX_PER_BEAT);
+  const widthPx = Math.max(36, beats * pxPerBeat);
 
   const maxBeats = maxBeatsFor(item, beatPeriodSeconds);
   const reelOver = totalSecondsClamp === "over";
@@ -387,11 +491,6 @@ function SortableClip({
   const atMax = !Number.isFinite(maxBeats) ? false : tailBeats <= 0;
   const atMin = beats <= MIN_BEATS;
   const atFront = videoStartBeats <= 0;
-
-  const headTrimSeconds =
-    beatPeriodSeconds && item.kind === "video" ? videoStartBeats * beatPeriodSeconds : 0;
-  const tailTrimSeconds =
-    beatPeriodSeconds && item.kind === "video" ? tailBeats * beatPeriodSeconds : 0;
 
   function startResize(side: "left" | "right", e: React.PointerEvent<HTMLDivElement>) {
     e.preventDefault();
@@ -404,7 +503,7 @@ function SortableClip({
 
     const move = (ev: PointerEvent) => {
       const dx = ev.clientX - startX;
-      const rawDelta = Math.round(dx / PX_PER_BEAT);
+      const rawDelta = Math.round(dx / pxPerBeat);
 
       if (side === "right") {
         let want = startBeats + rawDelta;
@@ -458,115 +557,94 @@ function SortableClip({
     width: `${widthPx}px`,
   } as const;
 
-  const sourceTotal = videoStartBeats + beats + tailBeats;
-  const headPct = sourceTotal > 0 ? (videoStartBeats / sourceTotal) * 100 : 0;
-  const activePct = sourceTotal > 0 ? (beats / sourceTotal) * 100 : 100;
-
   return (
     <div
       ref={setNodeRef}
-      className="group relative flex shrink-0 flex-col rounded-2xl border border-emerald-400/30 bg-gradient-to-b from-emerald-500/15 to-emerald-500/5 p-2 pl-3 pr-3 text-white"
+      className="group relative flex h-16 shrink-0 overflow-hidden rounded-lg border border-emerald-400/30 bg-black/40 text-white"
       style={style}
     >
+      {item.kind === "video" && item.previewFrames && item.previewFrames.length > 0 ? (
+        <Filmstrip frames={item.previewFrames} />
+      ) : item.kind === "image" ? (
+        <img alt={item.name} className="h-full w-full object-cover" draggable={false} src={item.src} />
+      ) : (
+        <div className="flex h-full w-full items-center justify-center text-[10px] text-emerald-200/60">
+          Loading…
+        </div>
+      )}
+
+      <div
+        className="absolute inset-0 cursor-grab active:cursor-grabbing"
+        {...attributes}
+        {...listeners}
+      />
+
+      <div className="pointer-events-none absolute left-1 top-1 z-10 rounded bg-black/55 px-1 text-[9px] font-mono text-emerald-100">
+        #{index + 1}
+      </div>
+      <button
+        aria-label="Remove"
+        className="absolute right-1 top-1 z-20 rounded bg-black/55 px-1 text-[10px] text-rose-200 opacity-0 transition hover:bg-rose-500/70 hover:text-white group-hover:opacity-100"
+        onClick={(e) => {
+          e.stopPropagation();
+          onRemove(item.id);
+        }}
+        type="button"
+      >
+        ✕
+      </button>
+
       <div
         aria-label="Drag left edge to resize"
-        className={`absolute left-0 top-0 z-10 flex h-full w-2.5 cursor-ew-resize items-center justify-center rounded-l-2xl bg-emerald-300/20 hover:bg-emerald-300/55 ${atMin && (item.kind !== "video" || atFront) ? "opacity-30" : ""}`}
+        className={`absolute left-0 top-0 z-30 flex h-full w-2 cursor-ew-resize items-center justify-center bg-emerald-300/25 hover:bg-emerald-300/60 ${atMin && (item.kind !== "video" || atFront) ? "opacity-30" : ""}`}
         onClick={(e) => e.stopPropagation()}
         onPointerDown={(e) => startResize("left", e)}
       >
-        <span className="h-8 w-0.5 rounded-full bg-emerald-200/80" />
+        <span className="h-6 w-0.5 rounded-full bg-emerald-100/90" />
       </div>
       <div
         aria-label="Drag right edge to resize"
-        className={`absolute right-0 top-0 z-10 flex h-full w-2.5 cursor-ew-resize items-center justify-center rounded-r-2xl bg-emerald-300/20 hover:bg-emerald-300/55 ${atMax || reelOver ? "opacity-30" : ""}`}
+        className={`absolute right-0 top-0 z-30 flex h-full w-2 cursor-ew-resize items-center justify-center bg-emerald-300/25 hover:bg-emerald-300/60 ${atMax || reelOver ? "opacity-30" : ""}`}
         onClick={(e) => e.stopPropagation()}
         onPointerDown={(e) => startResize("right", e)}
       >
-        <span className="h-8 w-0.5 rounded-full bg-emerald-200/80" />
+        <span className="h-6 w-0.5 rounded-full bg-emerald-100/90" />
       </div>
-
-      <div
-        className="flex cursor-grab items-center justify-between gap-1 active:cursor-grabbing"
-        {...attributes}
-        {...listeners}
-      >
-        <span className="rounded-full bg-emerald-400/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-emerald-200">
-          #{index + 1}
-        </span>
-        <span className="text-[10px] font-mono text-emerald-200/80">
-          {beats}b {seconds ? `· ${seconds.toFixed(1)}s` : ""}
-        </span>
-      </div>
-
-      <div className="relative mt-2 h-16 w-full overflow-hidden rounded-xl bg-black/40">
-        {item.kind === "video" ? (
-          <video
-            className="h-full w-full object-cover"
-            muted
-            playsInline
-            preload="metadata"
-            src={item.src}
-          />
-        ) : (
-          <img alt={item.name} className="h-full w-full object-cover" src={item.src} />
-        )}
-        {item.scene ? (
-          <span className="absolute left-1 top-1 rounded-full bg-black/60 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-emerald-200">
-            {item.scene}
-          </span>
-        ) : null}
-      </div>
-
-      {item.kind === "video" && Number.isFinite(maxBeats) ? (
-        <div className="mt-1.5">
-          <div className="flex h-2 w-full overflow-hidden rounded-full bg-white/5">
-            <div
-              className="h-full bg-zinc-500/50"
-              style={{ width: `${headPct}%` }}
-              title={`Trimmed front: ${headTrimSeconds.toFixed(1)}s`}
-            />
-            <div
-              className="h-full bg-emerald-300/85"
-              style={{ width: `${activePct}%` }}
-              title={`Active: ${(beats * (beatPeriodSeconds ?? 0)).toFixed(1)}s`}
-            />
-            <div
-              className="h-full bg-zinc-500/50"
-              style={{ width: `${100 - headPct - activePct}%` }}
-              title={`Trimmed tail: ${tailTrimSeconds.toFixed(1)}s`}
-            />
-          </div>
-          <div className="mt-0.5 flex justify-between text-[9px] font-mono leading-3 text-emerald-200/70">
-            <span>{headTrimSeconds > 0 ? `↤ ${headTrimSeconds.toFixed(1)}s` : ""}</span>
-            <span>
-              {tailTrimSeconds > 0 ? `${tailTrimSeconds.toFixed(1)}s ↦` : ""}
-            </span>
-          </div>
-        </div>
-      ) : null}
-
-      <div className="mt-2 flex items-center justify-end">
-        <button
-          aria-label="Remove"
-          className="rounded-md bg-white/10 px-2 py-0.5 text-xs text-rose-200 hover:bg-rose-500/30"
-          onClick={(e) => {
-            e.stopPropagation();
-            onRemove(item.id);
-          }}
-          type="button"
-        >
-          ✕
-        </button>
-      </div>
-
-      <input
-        className="mt-2 w-full rounded-md bg-white/5 px-2 py-1 text-[11px] text-emerald-50 placeholder:text-emerald-50/40"
-        onChange={(e) => onCaptionChange(item.id, e.target.value)}
-        onClick={(e) => e.stopPropagation()}
-        placeholder="Caption…"
-        type="text"
-        value={item.caption ?? ""}
-      />
     </div>
+  );
+}
+
+function Filmstrip({ frames }: { frames: string[] }) {
+  // Pick a fixed cell count; the cells fill clip width via flex.
+  // Sample evenly from the available frames.
+  const cells = 8;
+  return (
+    <div className="flex h-full w-full">
+      {Array.from({ length: cells }, (_, i) => {
+        const frameIdx = Math.min(
+          frames.length - 1,
+          Math.floor((i / Math.max(1, cells - 1)) * (frames.length - 1)),
+        );
+        return (
+          <img
+            alt=""
+            className="h-full min-w-0 flex-1 object-cover"
+            draggable={false}
+            key={i}
+            src={frames[frameIdx]}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function DropIndicator({ leftPx }: { leftPx: number }) {
+  return (
+    <div
+      data-drop-indicator
+      className="pointer-events-none absolute top-0 bottom-0 z-30 w-1 -translate-x-1/2 rounded-full bg-emerald-300 shadow-[0_0_12px_rgba(110,231,183,0.85)]"
+      style={{ left: `${leftPx}px` }}
+    />
   );
 }

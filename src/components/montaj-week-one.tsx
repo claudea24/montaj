@@ -3,11 +3,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Player, type PlayerRef } from "@remotion/player";
 import { SlideshowComposition } from "@/components/slideshow-composition";
-import { TimelineRail } from "@/components/timeline-rail";
+import { LIBRARY_DRAG_MIME, TimelineRail } from "@/components/timeline-rail";
 import {
   MUSIC_LIBRARY,
   type MusicTrack,
   type TimelineMedia,
+  extractVideoThumbnails,
   formatBytes,
   getStorageStatus,
   uploadFilesToSupabase,
@@ -39,6 +40,7 @@ function maxBeatsFor(item: TimelineMedia, beatPeriodSeconds: number | null): num
 
 export function MontajWeekOne() {
   const [timeline, setTimeline] = useState<TimelineMedia[]>([]);
+  const [library, setLibrary] = useState<TimelineMedia[]>([]);
   const [selectedTrack, setSelectedTrack] = useState<MusicTrack>(MUSIC_LIBRARY[0]);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
@@ -63,22 +65,40 @@ export function MontajWeekOne() {
   );
 
   const playerRef = useRef<PlayerRef>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [currentFrame, setCurrentFrame] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
 
   useEffect(() => {
     const player = playerRef.current;
     if (!player) return;
-    const handler = (event: { detail: { frame: number } }) => {
+    const onFrame = (event: { detail: { frame: number } }) => {
       setCurrentFrame(event.detail.frame);
     };
-    player.addEventListener("frameupdate", handler);
+    const onPlay = () => setIsPlaying(true);
+    const onPause = () => setIsPlaying(false);
+    const onEnded = () => setIsPlaying(false);
+    player.addEventListener("frameupdate", onFrame);
+    player.addEventListener("play", onPlay);
+    player.addEventListener("pause", onPause);
+    player.addEventListener("ended", onEnded);
     return () => {
-      player.removeEventListener("frameupdate", handler);
+      player.removeEventListener("frameupdate", onFrame);
+      player.removeEventListener("play", onPlay);
+      player.removeEventListener("pause", onPause);
+      player.removeEventListener("ended", onEnded);
     };
   }, []);
 
   const seekTo = useCallback((frame: number) => {
     playerRef.current?.seekTo(Math.max(0, Math.round(frame)));
+  }, []);
+
+  const togglePlay = useCallback(() => {
+    const p = playerRef.current;
+    if (!p) return;
+    if (p.isPlaying()) p.pause();
+    else p.play();
   }, []);
 
   useEffect(() => {
@@ -166,7 +186,6 @@ export function MontajWeekOne() {
     () => timeline.map((item) => item.caption ?? ""),
     [timeline],
   );
-
   function removeItem(id: string) {
     setTimeline((current) => {
       const removed = current.find((it) => it.id === id);
@@ -225,19 +244,56 @@ export function MontajWeekOne() {
     setStatusMessage("Preparing your upload...");
 
     try {
-      const nextTimeline = await uploadFilesToSupabase(files);
-      setTimeline((current) => [...current, ...nextTimeline]);
+      const uploaded = await uploadFilesToSupabase(files);
+      setLibrary((current) => [...current, ...uploaded]);
       setStatusMessage(
-        getStorageStatus().configured
-          ? `Added ${nextTimeline.length} item${nextTimeline.length === 1 ? "" : "s"} and synced them to Supabase Storage.`
-          : `Added ${nextTimeline.length} item${nextTimeline.length === 1 ? "" : "s"} locally. Add Supabase env vars when you want persistence.`,
+        `${uploaded.length} item${uploaded.length === 1 ? "" : "s"} ready — drag onto the rail to add.`,
       );
+
+      // Generate thumbnails in the background for any uploaded videos.
+      // Used only for static UI (library tile poster + rail filmstrip).
+      for (const item of uploaded) {
+        if (item.kind !== "video" || !item.durationSeconds) continue;
+        void extractVideoThumbnails(item.src, item.durationSeconds)
+          .then((frames) => {
+            if (frames.length === 0) return;
+            const apply = (list: TimelineMedia[]) =>
+              list.map((it) => (it.id === item.id ? { ...it, previewFrames: frames } : it));
+            setLibrary(apply);
+            setTimeline(apply);
+          })
+          .catch(() => {
+            // No thumbnail = blank tile; harmless.
+          });
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : "Upload failed.";
       setStatusMessage(message);
     } finally {
       setIsUploading(false);
     }
+  }
+
+  function insertLibraryItem(libraryId: string, atIndex: number) {
+    // Don't nest one setter inside another — under strict mode the updater
+    // runs twice and the inner setTimeline insert would duplicate.
+    const item = library.find((it) => it.id === libraryId);
+    if (!item) return;
+    setLibrary((current) => current.filter((it) => it.id !== libraryId));
+    setTimeline((current) => {
+      const clamped = Math.max(0, Math.min(atIndex, current.length));
+      const next = [...current];
+      next.splice(clamped, 0, item);
+      return next;
+    });
+  }
+
+  function removeLibraryItem(id: string) {
+    setLibrary((current) => {
+      const removed = current.find((it) => it.id === id);
+      if (removed?.src.startsWith("blob:")) URL.revokeObjectURL(removed.src);
+      return current.filter((it) => it.id !== id);
+    });
   }
 
   async function runAIAnalysis() {
@@ -303,7 +359,7 @@ export function MontajWeekOne() {
   }
 
   return (
-    <main className="mx-auto flex min-h-screen w-full max-w-7xl flex-col gap-6 px-4 py-6 md:px-8">
+    <main className="mx-auto flex h-screen w-full max-w-[1600px] flex-col gap-3 px-4 py-3 md:px-6">
       <header className="flex flex-wrap items-end justify-between gap-4">
         <div>
           <p className="text-xs uppercase tracking-[0.3em] text-[var(--accent)]">
@@ -343,63 +399,33 @@ export function MontajWeekOne() {
         </div>
       </header>
 
-      <section className="grid gap-4 lg:grid-cols-[1fr_360px]">
-        <div className="rounded-[28px] border border-[var(--line)] bg-[#0b1220] p-3 shadow-[var(--shadow)]">
-          <div className="mx-auto max-w-[420px] overflow-hidden rounded-[20px] border border-white/5 bg-black">
-            <Player
-              acknowledgeRemotionLicense
-              autoPlay
-              controls
-              component={SlideshowComposition}
-              compositionWidth={1080}
-              compositionHeight={1920}
-              durationInFrames={durationInFrames}
-              fps={FPS}
-              inputProps={{
-                images:
-                  timeline.length > 0
-                    ? timeline
-                    : [
-                        {
-                          id: "placeholder",
-                          name: "Placeholder",
-                          size: 0,
-                          src: "/placeholder/postcard.svg",
-                          kind: "image" as const,
-                        },
-                      ],
-                soundtrackSrc: selectedTrack.src,
-                soundtrackLoopFrames: Math.round(MUSIC_LENGTH_SECONDS * FPS),
-                perSlotFrames: timeline.length > 0 ? perSlotFrames : undefined,
-                perSlotStartFrames:
-                  timeline.length > 0 ? perSlotStartFrames : undefined,
-                fallbackSecondsPerImage: FALLBACK_SECONDS_PER_IMAGE,
-                captions: timeline.length > 0 ? captions : undefined,
-                transitionFrames: TRANSITION_FRAMES,
-              }}
-              ref={playerRef}
-              style={{ width: "100%", aspectRatio: "9 / 16" }}
-            />
-          </div>
-        </div>
-
-        <aside className="grid gap-4">
+      <section className="flex min-h-0 flex-1 gap-3">
+        <aside className="flex w-[320px] shrink-0 flex-col gap-3 overflow-y-auto pr-1">
           <section className="rounded-[24px] border border-[var(--line)] bg-[var(--panel)] p-4 shadow-[var(--shadow)]">
             <div className="flex items-center justify-between gap-3">
               <h2 className="text-base font-semibold">Upload</h2>
-              <label className="cursor-pointer rounded-full bg-[var(--accent)] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[var(--accent-strong)]">
+              <button
+                className="cursor-pointer rounded-full bg-[var(--accent)] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[var(--accent-strong)]"
+                onClick={() => fileInputRef.current?.click()}
+                type="button"
+              >
                 Choose
-                <input
-                  accept="image/png,image/jpeg,image/webp,image/heic,image/heif,.heic,.heif,video/quicktime,video/mp4,.mov,.mp4,.m4v"
-                  className="hidden"
-                  multiple
-                  onChange={(event) => void handleFiles(event.target.files)}
-                  type="file"
-                />
-              </label>
+              </button>
+              <input
+                accept="image/png,image/jpeg,image/webp,image/heic,image/heif,.heic,.heif,video/quicktime,video/mp4,.mov,.mp4,.m4v"
+                className="sr-only"
+                multiple
+                onChange={(event) => {
+                  void handleFiles(event.target.files);
+                  // Reset so picking the same file twice in a row still fires onChange.
+                  event.target.value = "";
+                }}
+                ref={fileInputRef}
+                type="file"
+              />
             </div>
             <div
-              className={`mt-3 rounded-[18px] border-2 border-dashed px-3 py-5 text-center text-xs leading-5 transition ${
+              className={`mt-3 rounded-[18px] border-2 border-dashed px-3 py-3 text-center text-xs leading-5 transition ${
                 isDragging
                   ? "border-[var(--accent)] bg-[#eef9f7]"
                   : "border-[var(--line)] bg-white/60 text-[var(--muted)]"
@@ -415,8 +441,22 @@ export function MontajWeekOne() {
                 void handleFiles(event.dataTransfer.files);
               }}
             >
-              {isUploading ? "Uploading…" : "Drop photos / clips"}
+              {isUploading ? "Uploading…" : "Drop files to add to library"}
             </div>
+            {library.length > 0 ? (
+              <ul
+                className="mt-3 grid max-h-[280px] grid-cols-2 gap-2 overflow-y-auto pr-1"
+                data-library-list
+              >
+                {library.map((item) => (
+                  <LibraryCard
+                    item={item}
+                    key={item.id}
+                    onRemove={removeLibraryItem}
+                  />
+                ))}
+              </ul>
+            ) : null}
             <p className="mt-2 text-xs leading-5 text-[var(--muted)]">{statusMessage}</p>
           </section>
 
@@ -475,15 +515,65 @@ export function MontajWeekOne() {
             <p className="mt-2 text-xs leading-5 text-[var(--muted)]">{aiMessage}</p>
           </section>
         </aside>
+
+        <div className="flex min-h-0 flex-1 items-center justify-center rounded-[28px] border border-[var(--line)] bg-[#0b1220] p-3 shadow-[var(--shadow)]">
+          <div
+            className="overflow-hidden rounded-[20px] border border-white/5 bg-black"
+            style={{ height: "100%", aspectRatio: "9 / 16" }}
+          >
+            <Player
+              acknowledgeRemotionLicense
+              clickToPlay
+              component={SlideshowComposition}
+              compositionWidth={1080}
+              compositionHeight={1920}
+              durationInFrames={durationInFrames}
+              fps={FPS}
+              inputProps={{
+                images:
+                  timeline.length > 0
+                    ? timeline
+                    : [
+                        {
+                          id: "placeholder",
+                          name: "Placeholder",
+                          size: 0,
+                          src: "/placeholder/postcard.svg",
+                          kind: "image" as const,
+                        },
+                      ],
+                soundtrackSrc: selectedTrack.src,
+                soundtrackLoopFrames: Math.round(MUSIC_LENGTH_SECONDS * FPS),
+                perSlotFrames: timeline.length > 0 ? perSlotFrames : undefined,
+                perSlotStartFrames:
+                  timeline.length > 0 ? perSlotStartFrames : undefined,
+                fallbackSecondsPerImage: FALLBACK_SECONDS_PER_IMAGE,
+                captions: timeline.length > 0 ? captions : undefined,
+                transitionFrames: TRANSITION_FRAMES,
+              }}
+              ref={playerRef}
+              style={{ width: "100%", height: "100%" }}
+            />
+          </div>
+        </div>
       </section>
 
-      <section className="rounded-[28px] border border-[var(--line)] bg-[var(--panel)] p-4 shadow-[var(--shadow)]">
+      <PlaybackToolbar
+        currentFrame={currentFrame}
+        fps={FPS}
+        isPlaying={isPlaying}
+        onTogglePlay={togglePlay}
+        totalFrames={totalFrames}
+      />
+
+      <section className="shrink-0 rounded-[24px] border border-[var(--line)] bg-[var(--panel)] p-3 shadow-[var(--shadow)]">
         <TimelineRail
           beatPeriodSeconds={beatPeriodSeconds}
           currentFrame={currentFrame}
           fps={FPS}
           onAutoFit={autoFit}
           onCaptionChange={setCaption}
+          onLibraryDrop={insertLibraryItem}
           onRemove={removeItem}
           onReorder={setTimeline}
           onSeek={seekTo}
@@ -498,4 +588,114 @@ export function MontajWeekOne() {
       </section>
     </main>
   );
+}
+
+type PlaybackToolbarProps = {
+  currentFrame: number;
+  totalFrames: number;
+  fps: number;
+  isPlaying: boolean;
+  onTogglePlay: () => void;
+};
+
+function PlaybackToolbar({
+  currentFrame,
+  totalFrames,
+  fps,
+  isPlaying,
+  onTogglePlay,
+}: PlaybackToolbarProps) {
+  return (
+    <div className="flex shrink-0 items-center justify-center gap-3 rounded-2xl border border-[var(--line)] bg-[var(--panel)] px-4 py-2 shadow-[var(--shadow)]">
+      <button
+        aria-label={isPlaying ? "Pause" : "Play"}
+        className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--accent)] text-white shadow transition hover:bg-[var(--accent-strong)]"
+        onClick={onTogglePlay}
+        type="button"
+      >
+        {isPlaying ? (
+          <svg fill="currentColor" height="18" viewBox="0 0 24 24" width="18">
+            <rect height="14" rx="1" width="4" x="6" y="5" />
+            <rect height="14" rx="1" width="4" x="14" y="5" />
+          </svg>
+        ) : (
+          <svg fill="currentColor" height="18" viewBox="0 0 24 24" width="18">
+            <path d="M8 5v14l11-7L8 5z" />
+          </svg>
+        )}
+      </button>
+      <div className="font-mono text-sm text-[var(--accent-strong)]">
+        <span className="font-semibold">{formatTimecode(currentFrame / fps)}</span>
+        <span className="mx-1 text-[var(--muted)]">|</span>
+        <span className="text-[var(--muted)]">{formatTimecode(totalFrames / fps)}</span>
+      </div>
+    </div>
+  );
+}
+
+function formatTimecode(seconds: number): string {
+  const safe = Math.max(0, seconds);
+  const mm = Math.floor(safe / 60);
+  const ss = Math.floor(safe % 60);
+  const cs = Math.floor((safe - Math.floor(safe)) * 100);
+  return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}:${String(cs).padStart(2, "0")}`;
+}
+
+type LibraryCardProps = {
+  item: TimelineMedia;
+  onRemove: (id: string) => void;
+};
+
+function LibraryCard({ item, onRemove }: LibraryCardProps) {
+  const duration = item.kind === "video" && item.durationSeconds
+    ? formatDurationLabel(item.durationSeconds)
+    : null;
+  const posterSrc = item.kind === "image"
+    ? item.src
+    : item.previewFrames?.[Math.floor((item.previewFrames.length - 1) / 2)] ?? null;
+  return (
+    <li
+      className="group relative cursor-grab overflow-hidden rounded-lg border border-[var(--line)] bg-zinc-900 text-xs transition hover:border-[var(--accent)] active:cursor-grabbing"
+      draggable
+      onDragEnd={(e) => {
+        e.currentTarget.classList.remove("opacity-50");
+      }}
+      onDragStart={(e) => {
+        e.dataTransfer.effectAllowed = "move";
+        e.dataTransfer.setData(LIBRARY_DRAG_MIME, item.id);
+        e.dataTransfer.setData("text/plain", item.name);
+        e.currentTarget.classList.add("opacity-50");
+      }}
+    >
+      <div className="relative aspect-[4/3] w-full bg-zinc-800">
+        {posterSrc ? (
+          <img alt="" className="h-full w-full object-cover" draggable={false} src={posterSrc} />
+        ) : item.kind === "video" ? (
+          <div className="flex h-full w-full items-center justify-center text-[11px] font-semibold text-white/40">
+            Loading…
+          </div>
+        ) : null}
+        {duration ? (
+          <span className="absolute bottom-1 left-1 rounded bg-black/60 px-1 py-0.5 font-mono text-[10px] text-white">
+            {duration}
+          </span>
+        ) : null}
+        <button
+          aria-label={`Remove ${item.name} from library`}
+          className="absolute right-1 top-1 rounded-full bg-black/60 px-1.5 text-[10px] text-white opacity-0 transition hover:bg-rose-500 group-hover:opacity-100"
+          onClick={() => onRemove(item.id)}
+          type="button"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="truncate px-1.5 py-1 text-[10px] text-[var(--accent-strong)]">{item.name}</div>
+    </li>
+  );
+}
+
+function formatDurationLabel(seconds: number): string {
+  const mm = Math.floor(seconds / 60);
+  const ss = Math.floor(seconds % 60);
+  return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
 }
