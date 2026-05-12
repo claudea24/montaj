@@ -1,4 +1,4 @@
-import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { heicTo, isHeic } from "heic-to";
 
 export type TimelineMediaKind = "image" | "video";
@@ -15,6 +15,11 @@ export type TimelineMedia = {
   qualityScore?: number;
   beats?: number;
   videoStartBeats?: number;
+  /** Storage object key in the `montaj-media` bucket once uploaded.
+   *  Used to rebuild signed URLs after reload; absent for unsaved local items. */
+  storagePath?: string;
+  /** Row id in `public.assets`; absent until persisted. */
+  assetId?: string;
   /** Sparse JPEG thumbnails for static UI (library tile poster + rail filmstrip).
    *  NOT used during playback — the slot renders the real <Video> directly. */
   previewFrames?: string[];
@@ -88,17 +93,10 @@ export const MUSIC_LIBRARY: MusicTrack[] = [
   },
 ];
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
-const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const SUPABASE_BUCKET =
-  process.env.NEXT_PUBLIC_SUPABASE_BUCKET ?? "montaj-media";
+  process.env.NEXT_PUBLIC_SUPABASE_BUCKET?.trim() ?? "montaj-media";
 
-const supabase =
-  SUPABASE_URL && SUPABASE_ANON_KEY
-    ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
-    : null;
-
-export function getStorageStatus() {
+export function getStorageStatus(supabase: SupabaseClient | null) {
   return {
     configured: Boolean(supabase),
     bucket: SUPABASE_BUCKET,
@@ -296,31 +294,146 @@ async function prepareFile(file: File): Promise<PreparedMedia> {
   };
 }
 
-export async function uploadFilesToSupabase(files: FileList | File[]) {
-  return uploadFileArrayToSupabase(Array.from(files));
+export type UploadContext = {
+  supabase: SupabaseClient | null;
+  userId: string | null;
+  projectId: string | null;
+};
+
+const ASSET_URL_TTL_SECONDS = 60 * 60 * 24;
+
+export async function loadProjectAssets(
+  supabase: SupabaseClient,
+  projectId: string,
+): Promise<TimelineMedia[]> {
+  const { data: rows, error } = await supabase
+    .from("assets")
+    .select(
+      "id, kind, name, size_bytes, storage_path, duration_seconds, created_at",
+    )
+    .eq("project_id", projectId)
+    .order("created_at", { ascending: false });
+  if (error) throw new Error(`loadProjectAssets: ${error.message}`);
+  if (!rows || rows.length === 0) return [];
+
+  const paths = rows.map((r) => r.storage_path as string);
+  const { data: signed, error: signError } = await supabase.storage
+    .from(SUPABASE_BUCKET)
+    .createSignedUrls(paths, ASSET_URL_TTL_SECONDS);
+  if (signError) throw new Error(`signed URLs: ${signError.message}`);
+
+  const urlByPath = new Map<string, string>();
+  for (const s of signed ?? []) {
+    if (s.path && s.signedUrl) urlByPath.set(s.path, s.signedUrl);
+  }
+
+  return rows.map((r) => ({
+    id: r.id as string,
+    assetId: r.id as string,
+    name: r.name as string,
+    size: Number(r.size_bytes ?? 0),
+    src: urlByPath.get(r.storage_path as string) ?? "",
+    kind: r.kind as TimelineMediaKind,
+    durationSeconds: r.duration_seconds ?? undefined,
+    storagePath: r.storage_path as string,
+  }));
 }
 
-export async function uploadFileArrayToSupabase(files: File[]) {
+/** Replaces stale src (e.g., blob: URLs from a prior session) with fresh signed
+ *  URLs resolved from each item's storagePath. Items without storagePath are
+ *  kept as-is if their src is still a usable URL; blob: URLs without backing
+ *  storage are dropped because they will only crash Remotion's <Video>. */
+export async function resolveTimelineMediaUrls(
+  supabase: SupabaseClient,
+  items: TimelineMedia[],
+): Promise<TimelineMedia[]> {
+  const paths = Array.from(
+    new Set(
+      items
+        .map((i) => i.storagePath)
+        .filter((p): p is string => Boolean(p)),
+    ),
+  );
+  let urlByPath = new Map<string, string>();
+  if (paths.length > 0) {
+    const { data, error } = await supabase.storage
+      .from(SUPABASE_BUCKET)
+      .createSignedUrls(paths, ASSET_URL_TTL_SECONDS);
+    if (error) throw new Error(`resolveTimelineMediaUrls: ${error.message}`);
+    urlByPath = new Map(
+      (data ?? [])
+        .filter((s) => s.path && s.signedUrl)
+        .map((s) => [s.path as string, s.signedUrl as string]),
+    );
+  }
+  const resolved: TimelineMedia[] = [];
+  for (const it of items) {
+    if (it.storagePath) {
+      const url = urlByPath.get(it.storagePath);
+      if (url) {
+        resolved.push({ ...it, src: url });
+        continue;
+      }
+    }
+    if (it.src && !it.src.startsWith("blob:")) {
+      resolved.push(it);
+    }
+    // else: stale blob URL with no backing storage — drop it.
+  }
+  return resolved;
+}
+
+export async function uploadFilesToSupabase(
+  ctx: UploadContext,
+  files: FileList | File[],
+) {
+  return uploadFileArrayToSupabase(ctx, Array.from(files));
+}
+
+export async function uploadFileArrayToSupabase(
+  ctx: UploadContext,
+  files: File[],
+) {
   const prepared = await Promise.all(files.map(prepareFile));
   const timeline = prepared.map((p) => p.timeline);
+  const { supabase, userId, projectId } = ctx;
 
-  if (!supabase) {
+  if (!supabase || !userId || !projectId) {
     return timeline;
   }
 
   await Promise.all(
-    prepared.map(async ({ uploadFile }) => {
-      const key = `${Date.now()}-${crypto.randomUUID()}-${uploadFile.name}`;
-      const { error } = await supabase.storage
-        .from(SUPABASE_BUCKET)
-        .upload(key, uploadFile, {
-          cacheControl: "3600",
-          upsert: false,
-        });
+    prepared.map(async ({ uploadFile }, i) => {
+      const safeName = uploadFile.name.replace(/[^A-Za-z0-9._-]/g, "_");
+      const key = `${userId}/${projectId}/${crypto.randomUUID()}-${safeName}`;
+      const item = timeline[i];
 
-      if (error) {
-        throw new Error(`Supabase upload failed: ${error.message}`);
+      const { error: uploadError } = await supabase.storage
+        .from(SUPABASE_BUCKET)
+        .upload(key, uploadFile, { cacheControl: "3600", upsert: false });
+      if (uploadError) {
+        throw new Error(`Supabase upload failed: ${uploadError.message}`);
       }
+
+      const { data: asset, error: insertError } = await supabase
+        .from("assets")
+        .insert({
+          user_id: userId,
+          project_id: projectId,
+          kind: item.kind,
+          name: uploadFile.name,
+          size_bytes: uploadFile.size,
+          storage_path: key,
+          duration_seconds: item.durationSeconds ?? null,
+        })
+        .select("id")
+        .single();
+      if (insertError) {
+        throw new Error(`Assets insert failed: ${insertError.message}`);
+      }
+
+      item.storagePath = key;
+      item.assetId = asset?.id;
     }),
   );
 

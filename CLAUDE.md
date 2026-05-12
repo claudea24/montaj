@@ -2,6 +2,74 @@
 
 Project-scoped notes. The repo-root `CLAUDE.md` (one directory up) covers global security and Supabase MCP setup; this file is montaj-specific.
 
+## Resume here — backend setup in progress (paused 2026-05-12)
+
+**Where we paused:** Step 1 of the 4-step backend setup (see "Backend setup plan" below). Waiting on the user to provision a Supabase project and register the MCP locally.
+
+**What the user is doing offline:**
+1. Create new Supabase project at https://supabase.com/dashboard/new (name `montaj`).
+2. Copy the project ref (the 20-char segment in `dashboard/project/<REF>` or **Project Settings → General → Reference ID**).
+3. Run `claude mcp add supabase --transport http "https://mcp.supabase.com/mcp?project_ref=<REF>"`, then `/exit` and re-launch `claude` from `/Users/claudea/projects/montaj` so the supabase MCP tools load.
+4. From **Project Settings → API**, copy **Project URL** and **anon public** key into `.env.local`:
+   ```
+   NEXT_PUBLIC_SUPABASE_URL=...
+   NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+   NEXT_PUBLIC_SUPABASE_BUCKET=montaj-media
+   ```
+5. Verify `.gitignore` covers `.env.local` (it should — never read or commit env files; see repo-root `CLAUDE.md` security rules).
+
+**What I do when they return and say "step 1 done":**
+1. `claude mcp list | grep supabase` — confirm the MCP is registered.
+2. Call `mcp__supabase__authenticate` and complete the auth flow if needed.
+3. Verify access: list buckets, list `auth.users` table, list public schema — all should respond without errors.
+4. Once verified, mark Task #23 complete and start Task #24 (Step 2 — Clerk).
+
+**Do not start Step 2 (Clerk) or Step 4 (Vercel) until Step 1 is verified working.** The user was explicit about this ordering — see the "Backend Setup Requirements" message they sent.
+
+## Backend setup plan (4 ordered steps)
+
+The user pinned this ordering. Don't reorder.
+
+### Step 1 — Supabase MCP (in progress, see Resume here above)
+
+Goal: Claude can read schema, storage buckets, auth tables, and project env vars via the Supabase MCP. Project credentials wired into `.env.local`.
+
+### Step 2 — Clerk auth (blocked on Step 1)
+
+Goal: Clerk + native Supabase third-party-auth integration (April 2025 pattern; **NOT** the deprecated JWT-template approach). The repo-root `CLAUDE.md` has the exact dashboard setup steps and client/server code patterns — follow those.
+
+- Dashboard wiring: Clerk **Activate Supabase integration** → copy Clerk domain → Supabase **Authentication > Sign In/Up → Add provider → Clerk** → paste domain.
+- Auth features: email/password sign-in, Google OAuth, persistent sessions, route protection via Clerk middleware.
+- RLS policies use `(select auth.jwt()->>'sub') = (user_id)::text` with `to authenticated`.
+- Code: replace the unauthed Supabase client in `src/lib/media.ts` with one that calls `session.getToken()` for `accessToken` (client-side) and `(await auth()).getToken()` (server-side).
+- Each user gets isolated access via RLS — no app-level filtering on `user_id` should be needed once policies are in place.
+
+### Step 3 — Project + storage schema (blocked on Step 2)
+
+Goal: auto-saved per-user projects with media + timeline state.
+
+Tables (all with RLS `user_id = auth.jwt()->>'sub'`, `to authenticated`):
+- `profiles` — Clerk user id, display name, created_at.
+- `projects` — id, owner, title, status (draft|finalized), updated_at, target_seconds, selected_track_id.
+- `assets` — id, project_id, kind (image|video), src (storage path), duration_seconds, name, size.
+- `timelines` — id, project_id, slots jsonb (`[{asset_id, beats, video_start_beats, caption}]`), revision.
+- `exports` — id, project_id, status, output_url, started_at, finished_at.
+
+Storage buckets:
+- `montaj-media` (already in `.env.example`) — raw uploads.
+- `montaj-exports` — rendered MP4s.
+
+Auto-save: debounced `setTimeline` writes a new `timelines` row (or updates the latest, depending on whether we want revision history). Recommend keeping the last 5 revisions per project so users can recover drafts.
+
+### Step 4 — Vercel deploy (blocked on Step 3)
+
+Only deploy after the local app works end-to-end with auth + persistence.
+
+- Env vars in Vercel dashboard: `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_SUPABASE_BUCKET`, Clerk publishable + secret keys.
+- ffmpeg routes (`/api/transcode-video`) need bumped memory + `maxDuration` (already 120s in code). Confirm Vercel Pro plan limits accommodate.
+- 250 MB upload cap stays. For larger files use direct-to-Supabase-Storage uploads with signed URLs (skip the Next.js route entirely).
+- Verify HEVC transcode works on Vercel's Linux: Vercel doesn't ship ffmpeg by default — use `@ffmpeg-installer/ffmpeg` as a dep or switch to Vercel's image of choice (or move transcode to a Supabase Edge Function / external worker).
+
 ## Repo facts
 
 - **Framework:** Next.js 16 App Router, Tailwind 4, TypeScript.
@@ -101,7 +169,7 @@ Do them in this order — earlier steps reduce risk for later ones, and the trim
 - **MP4 export** — Remotion `@remotion/renderer` server route, with a "video-only" branch when the soundtrack is yt-dlp-fetched. Note: the slot uses `<Video>` for preview smoothness; renderer mode honors that, but if fidelity issues appear, swapping to `<OffthreadVideo>` for render only (via `getRemotionEnvironment().isRendering`) is a documented escape hatch.
 - **Natural-language AI refinement** — "make the intro faster", "swap clip 3 for a wider shot". Single `/api/refine` endpoint that takes the current timeline + a prompt and returns a patch (reorders, beat changes, swaps).
 - **Vibe / mood selector** — text → biases AI selection prompts (`scripts/analyze.sh`) and editing pace.
-- **Live Supabase + Clerk provisioning** — wire to a real project so uploads persist per user. The repo-root `CLAUDE.md` already documents the Clerk-Supabase native integration pattern.
+- **Live Supabase + Clerk + Vercel provisioning** — see the "Backend setup plan" section near the top of this file. That work supersedes whatever's left here.
 
 ## Verification commands
 

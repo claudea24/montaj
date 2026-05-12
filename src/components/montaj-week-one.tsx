@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Player, type PlayerRef } from "@remotion/player";
+import { UserButton, useUser } from "@clerk/nextjs";
 import { SlideshowComposition } from "@/components/slideshow-composition";
 import { LIBRARY_DRAG_MIME, TimelineRail } from "@/components/timeline-rail";
 import {
@@ -11,8 +13,21 @@ import {
   extractVideoThumbnails,
   formatBytes,
   getStorageStatus,
+  loadProjectAssets,
+  resolveTimelineMediaUrls,
   uploadFilesToSupabase,
 } from "@/lib/media";
+import { useSupabaseClient } from "@/lib/supabase-browser";
+import {
+  createProject,
+  deleteProject,
+  getProject,
+  listProjects,
+  renameProject,
+  updateProjectDocument,
+  type ProjectDocument,
+  type ProjectSummary,
+} from "@/lib/projects";
 import { detectBeats, type BeatGrid } from "@/lib/beats";
 import { imageSrcToDataUrl } from "@/lib/photo-thumb";
 import type { AnalysisResult } from "@/lib/ai";
@@ -39,6 +54,7 @@ function maxBeatsFor(item: TimelineMedia, beatPeriodSeconds: number | null): num
 }
 
 type NavSection =
+  | "dashboard"
   | "media"
   | "audio"
   | "text"
@@ -48,16 +64,48 @@ type NavSection =
   | "filters"
   | "export";
 
-export function MontajWeekOne() {
+type MontajWeekOneProps = {
+  projectId: string | null;
+};
+
+const AUTOSAVE_INTERVAL_MS = 15_000;
+
+export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
+  const router = useRouter();
+  const supabase = useSupabaseClient();
+  const { user } = useUser();
+  const userId = user?.id ?? null;
   const [timeline, setTimeline] = useState<TimelineMedia[]>([]);
   const [library, setLibrary] = useState<TimelineMedia[]>([]);
   const [selectedTrack, setSelectedTrack] = useState<MusicTrack>(MUSIC_LIBRARY[0]);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
-  const [navSection, setNavSection] = useState<NavSection>("media");
+  const [navSection, setNavSection] = useState<NavSection>(
+    projectId ? "media" : "dashboard",
+  );
+  const effectiveNavSection: NavSection = projectId ? navSection : "dashboard";
+
+  const handleNavSelect = useCallback(
+    (id: NavSection) => {
+      if (id === "dashboard") {
+        if (projectId) router.push("/");
+        return;
+      }
+      if (!projectId) return;
+      setNavSection(id);
+    },
+    [projectId, router],
+  );
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [projectLoaded, setProjectLoaded] = useState(false);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">(
+    "idle",
+  );
+  const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
+  const dirtyRef = useRef(false);
+  const savingRef = useRef(false);
   const [statusMessage, setStatusMessage] = useState<string>(
-    getStorageStatus().configured
+    getStorageStatus(supabase).configured
       ? "Supabase storage is configured. Uploaded images will also be persisted."
       : "Supabase storage is not configured yet. Images will stay local in the browser for the demo.",
   );
@@ -105,6 +153,105 @@ export function MontajWeekOne() {
   const seekTo = useCallback((frame: number) => {
     playerRef.current?.seekTo(Math.max(0, Math.round(frame)));
   }, []);
+
+  // Load project document once Supabase client + projectId are ready.
+  useEffect(() => {
+    if (!supabase || !projectId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const project = await getProject(supabase, projectId);
+        if (cancelled) return;
+        if (project?.document) {
+          const doc = project.document;
+          const resolvedTimeline = await resolveTimelineMediaUrls(
+            supabase,
+            doc.timeline ?? [],
+          );
+          if (cancelled) return;
+          setTimeline(resolvedTimeline);
+          const track =
+            MUSIC_LIBRARY.find((t) => t.id === doc.selectedTrackId) ??
+            MUSIC_LIBRARY[0];
+          setSelectedTrack(track);
+          setTargetSeconds(doc.targetSeconds ?? DEFAULT_TARGET_SECONDS);
+        }
+        setProjectLoaded(true);
+        dirtyRef.current = false;
+      } catch (e) {
+        if (!cancelled) {
+          setStatusMessage(
+            `Failed to load project: ${e instanceof Error ? e.message : "unknown error"}`,
+          );
+          setProjectLoaded(true);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [supabase, projectId]);
+
+  // Load uploaded assets into the media library when a project opens.
+  useEffect(() => {
+    if (!supabase || !projectId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setLibrary([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const items = await loadProjectAssets(supabase, projectId);
+        if (!cancelled) setLibrary(items);
+      } catch (e) {
+        if (!cancelled) {
+          setStatusMessage(
+            `Failed to load assets: ${e instanceof Error ? e.message : "unknown error"}`,
+          );
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [supabase, projectId]);
+
+  // Mark dirty whenever the document state changes (after first load).
+  useEffect(() => {
+    if (!projectLoaded) return;
+    dirtyRef.current = true;
+  }, [timeline, selectedTrack, targetSeconds, projectLoaded]);
+
+  // 15s autosave loop. Skips when nothing has changed.
+  useEffect(() => {
+    if (!supabase || !projectId || !projectLoaded) return;
+    const id = setInterval(async () => {
+      if (!dirtyRef.current || savingRef.current) return;
+      savingRef.current = true;
+      dirtyRef.current = false;
+      setSaveState("saving");
+      try {
+        const doc: ProjectDocument = {
+          timeline,
+          selectedTrackId: selectedTrack.id,
+          targetSeconds,
+        };
+        await updateProjectDocument(supabase, projectId, doc);
+        setSaveState("saved");
+        setLastSavedAt(Date.now());
+      } catch (e) {
+        dirtyRef.current = true;
+        setSaveState("error");
+        setStatusMessage(
+          `Autosave failed: ${e instanceof Error ? e.message : "unknown error"}`,
+        );
+      } finally {
+        savingRef.current = false;
+      }
+    }, AUTOSAVE_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [supabase, projectId, projectLoaded, timeline, selectedTrack, targetSeconds]);
 
   const togglePlay = useCallback(() => {
     const p = playerRef.current;
@@ -256,7 +403,10 @@ export function MontajWeekOne() {
     setStatusMessage("Preparing your upload...");
 
     try {
-      const uploaded = await uploadFilesToSupabase(files);
+      const uploaded = await uploadFilesToSupabase(
+        { supabase, userId, projectId },
+        files,
+      );
       setLibrary((current) => [...current, ...uploaded]);
       setStatusMessage(
         `${uploaded.length} item${uploaded.length === 1 ? "" : "s"} ready — drag onto the rail to add.`,
@@ -287,15 +437,13 @@ export function MontajWeekOne() {
   }
 
   function insertLibraryItem(libraryId: string, atIndex: number) {
-    // Don't nest one setter inside another — under strict mode the updater
-    // runs twice and the inner setTimeline insert would duplicate.
     const item = library.find((it) => it.id === libraryId);
     if (!item) return;
-    setLibrary((current) => current.filter((it) => it.id !== libraryId));
+    const clone: TimelineMedia = { ...item, id: crypto.randomUUID() };
     setTimeline((current) => {
       const clamped = Math.max(0, Math.min(atIndex, current.length));
       const next = [...current];
-      next.splice(clamped, 0, item);
+      next.splice(clamped, 0, clone);
       return next;
     });
   }
@@ -374,28 +522,59 @@ export function MontajWeekOne() {
     selectedClipId == null ? null : timeline.find((it) => it.id === selectedClipId) ?? null;
 
   return (
-    <main className="flex h-screen w-full overflow-hidden bg-[var(--bg)] text-[var(--ink)]">
-      <LeftNav active={navSection} onChange={setNavSection} />
-
-      <MediaPanel
-        aiMessage={aiMessage}
-        aiStatus={aiStatus}
-        beatGrid={beatGrid}
-        beatStatus={beatStatus}
-        fileInputRef={fileInputRef}
-        isDragging={isDragging}
-        isUploading={isUploading}
-        library={library}
-        onFiles={handleFiles}
-        onRemoveLibrary={removeLibraryItem}
-        onRunAi={runAIAnalysis}
-        onSelectTrack={setSelectedTrack}
-        onSetDragging={setIsDragging}
-        section={navSection}
-        selectedTrack={selectedTrack}
-        statusMessage={statusMessage}
-        timelineLength={timeline.length}
+    <main className="relative flex h-screen w-full overflow-hidden bg-[var(--bg)] text-[var(--ink)]">
+      <div className="pointer-events-auto absolute right-3 top-3 z-50 flex items-center gap-3">
+        <span
+          className={`rounded-md border px-2 py-1 text-[11px] font-medium ${
+            saveState === "saving"
+              ? "border-[var(--line)] bg-[var(--panel)] text-[var(--ink-soft)]"
+              : saveState === "error"
+                ? "border-rose-300 bg-rose-50 text-rose-700"
+                : saveState === "saved"
+                  ? "border-emerald-300 bg-emerald-50 text-emerald-700"
+                  : "border-transparent text-transparent"
+          }`}
+          aria-live="polite"
+        >
+          {saveState === "saving"
+            ? "Saving…"
+            : saveState === "error"
+              ? "Save failed"
+              : saveState === "saved" && lastSavedAt
+                ? `Saved ${new Date(lastSavedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+                : "·"}
+        </span>
+        <UserButton />
+      </div>
+      <LeftNav
+        active={effectiveNavSection}
+        onChange={handleNavSelect}
+        hasProject={Boolean(projectId)}
       />
+
+      {effectiveNavSection === "dashboard" ? (
+        <DashboardPanel currentProjectId={projectId} />
+      ) : (
+        <MediaPanel
+          aiMessage={aiMessage}
+          aiStatus={aiStatus}
+          beatGrid={beatGrid}
+          beatStatus={beatStatus}
+          fileInputRef={fileInputRef}
+          isDragging={isDragging}
+          isUploading={isUploading}
+          library={library}
+          onFiles={handleFiles}
+          onRemoveLibrary={removeLibraryItem}
+          onRunAi={runAIAnalysis}
+          onSelectTrack={setSelectedTrack}
+          onSetDragging={setIsDragging}
+          section={navSection}
+          selectedTrack={selectedTrack}
+          statusMessage={statusMessage}
+          timelineLength={timeline.length}
+        />
+      )}
 
       <section className="flex min-h-0 flex-1 flex-col gap-3 bg-[var(--bg-soft)] px-3 py-3">
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-3">
@@ -599,6 +778,7 @@ function formatDurationLabel(seconds: number): string {
 }
 
 const NAV_ITEMS: { id: NavSection; label: string; icon: string }[] = [
+  { id: "dashboard", label: "Dashboard", icon: "⌂" },
   { id: "media", label: "Media", icon: "▦" },
   { id: "audio", label: "Audio", icon: "♪" },
   { id: "text", label: "Text", icon: "T" },
@@ -612,9 +792,11 @@ const NAV_ITEMS: { id: NavSection; label: string; icon: string }[] = [
 function LeftNav({
   active,
   onChange,
+  hasProject,
 }: {
   active: NavSection;
   onChange: (id: NavSection) => void;
+  hasProject: boolean;
 }) {
   return (
     <nav className="flex w-[72px] shrink-0 flex-col items-stretch gap-1 border-r border-[var(--line)] bg-[var(--panel)] py-3">
@@ -623,25 +805,291 @@ function LeftNav({
       </div>
       {NAV_ITEMS.map((it) => {
         const isActive = it.id === active;
+        const isDashboard = it.id === "dashboard";
+        const disabled = !isDashboard && !hasProject;
         return (
           <button
             aria-label={it.label}
             aria-pressed={isActive}
-            className={`mx-2 flex flex-col items-center gap-0.5 rounded-lg px-1 py-2 text-[10px] transition ${
+            disabled={disabled}
+            title={it.label}
+            className={`mx-1.5 flex flex-col items-center gap-1 rounded-lg px-1 py-2 transition ${
               isActive
                 ? "bg-[var(--accent-soft)] text-[var(--accent-strong)]"
-                : "text-[var(--muted)] hover:bg-[var(--panel-soft)] hover:text-[var(--ink)]"
+                : disabled
+                  ? "cursor-not-allowed text-[var(--muted)] opacity-40"
+                  : "text-[var(--muted)] hover:bg-[var(--panel-soft)] hover:text-[var(--ink)]"
             }`}
             key={it.id}
             onClick={() => onChange(it.id)}
             type="button"
           >
             <span className="text-base leading-none">{it.icon}</span>
-            <span className="font-medium tracking-wide">{it.label}</span>
+            <span className="w-full truncate text-center text-[9px] font-medium leading-none">
+              {it.label}
+            </span>
           </button>
         );
       })}
     </nav>
+  );
+}
+
+function DashboardPanel({
+  currentProjectId,
+}: {
+  currentProjectId: string | null;
+}) {
+  const router = useRouter();
+  const supabase = useSupabaseClient();
+  const { user, isLoaded } = useUser();
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [naming, setNaming] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+
+  const refresh = useCallback(async () => {
+    if (!supabase) return;
+    setLoading(true);
+    try {
+      const rows = await listProjects(supabase);
+      setProjects(rows);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to load projects");
+    } finally {
+      setLoading(false);
+    }
+  }, [supabase]);
+
+  useEffect(() => {
+    if (!isLoaded || !user || !supabase) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void refresh();
+  }, [isLoaded, user, supabase, refresh]);
+
+  useEffect(() => {
+    if (naming) inputRef.current?.focus();
+  }, [naming]);
+
+  useEffect(() => {
+    if (renamingId) {
+      renameInputRef.current?.focus();
+      renameInputRef.current?.select();
+    }
+  }, [renamingId]);
+
+  async function commitRename(id: string) {
+    if (!supabase) return;
+    const name = renameDraft.trim();
+    const existing = projects.find((p) => p.id === id);
+    if (!name || !existing || name === existing.name) {
+      setRenamingId(null);
+      return;
+    }
+    try {
+      await renameProject(supabase, id, name);
+      setProjects((cur) => cur.map((p) => (p.id === id ? { ...p, name } : p)));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to rename project");
+    } finally {
+      setRenamingId(null);
+    }
+  }
+
+  async function submitCreate() {
+    if (!supabase || !user) return;
+    const name = newName.trim();
+    if (!name) return;
+    setSubmitting(true);
+    try {
+      const project = await createProject(supabase, user.id, name);
+      router.push(`/projects/${project.id}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to create project");
+      setSubmitting(false);
+    }
+  }
+
+  async function handleDelete(id: string) {
+    if (!supabase) return;
+    if (!confirm("Delete this project? Assets will be removed too.")) return;
+    try {
+      await deleteProject(supabase, id);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Failed to delete project");
+    }
+  }
+
+  return (
+    <aside className="flex w-[340px] shrink-0 flex-col gap-3 overflow-y-auto border-r border-[var(--line)] bg-[var(--panel)] px-4 py-4">
+      <header className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold tracking-wide text-[var(--ink)]">
+          Projects
+        </h2>
+        {!naming && (
+          <button
+            type="button"
+            onClick={() => {
+              setNewName("");
+              setNaming(true);
+            }}
+            className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-medium text-white shadow-sm transition hover:bg-[var(--accent-strong)]"
+          >
+            + New
+          </button>
+        )}
+      </header>
+
+      {naming && (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void submitCreate();
+          }}
+          className="flex flex-col gap-2 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] p-3"
+        >
+          <input
+            ref={inputRef}
+            type="text"
+            placeholder="Project name"
+            value={newName}
+            onChange={(e) => setNewName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Escape") {
+                setNaming(false);
+                setNewName("");
+              }
+            }}
+            disabled={submitting}
+            className="rounded-md border border-[var(--line)] bg-[var(--panel)] px-2 py-1.5 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+          />
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setNaming(false);
+                setNewName("");
+              }}
+              disabled={submitting}
+              className="rounded-md px-2.5 py-1 text-[11px] text-[var(--ink-soft)] hover:text-[var(--ink)] disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting || !newName.trim()}
+              className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-medium text-white shadow-sm transition hover:bg-[var(--accent-strong)] disabled:opacity-50"
+            >
+              {submitting ? "Creating…" : "Create"}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {error && (
+        <div className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700">
+          {error}
+        </div>
+      )}
+
+      {loading ? (
+        <p className="text-xs text-[var(--ink-soft)]">Loading…</p>
+      ) : projects.length === 0 ? (
+        <p className="rounded-lg border border-dashed border-[var(--line)] px-3 py-6 text-center text-xs text-[var(--ink-soft)]">
+          No projects yet. Click <strong>+ New</strong> to start.
+        </p>
+      ) : (
+        <ul className="flex flex-col gap-1.5">
+          {projects.map((p) => {
+            const isCurrent = currentProjectId === p.id;
+            const isRenaming = renamingId === p.id;
+            return (
+              <li key={p.id} className="group relative">
+                {isRenaming ? (
+                  <div
+                    className={`rounded-lg border px-3 py-2 ${
+                      isCurrent
+                        ? "border-[var(--accent)] bg-[var(--accent-soft)]"
+                        : "border-[var(--line)] bg-[var(--panel)]"
+                    }`}
+                  >
+                    <input
+                      ref={renameInputRef}
+                      type="text"
+                      value={renameDraft}
+                      onChange={(e) => setRenameDraft(e.target.value)}
+                      onBlur={() => void commitRename(p.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          void commitRename(p.id);
+                        } else if (e.key === "Escape") {
+                          setRenamingId(null);
+                        }
+                      }}
+                      className="w-full rounded border border-[var(--line)] bg-[var(--panel)] px-2 py-1 text-sm text-[var(--ink)] outline-none focus:border-[var(--accent)]"
+                    />
+                    <div className="mt-0.5 text-[10px] text-[var(--ink-soft)]">
+                      {new Date(p.updated_at).toLocaleString()}
+                    </div>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => router.push(`/projects/${p.id}`)}
+                    className={`block w-full rounded-lg border px-3 py-2 text-left transition ${
+                      isCurrent
+                        ? "border-[var(--accent)] bg-[var(--accent-soft)]"
+                        : "border-[var(--line)] bg-[var(--panel)] hover:border-[var(--accent)]"
+                    }`}
+                  >
+                    <div className="truncate pr-12 text-sm font-medium text-[var(--ink)]">
+                      {p.name}
+                    </div>
+                    <div className="mt-0.5 text-[10px] text-[var(--ink-soft)]">
+                      {new Date(p.updated_at).toLocaleString()}
+                    </div>
+                  </button>
+                )}
+                {!isRenaming && (
+                  <div className="absolute right-2 top-2 flex gap-1 opacity-0 transition group-hover:opacity-100">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setRenameDraft(p.name);
+                        setRenamingId(p.id);
+                      }}
+                      aria-label="Rename project"
+                      className="rounded p-1 text-[var(--ink-soft)] hover:bg-[var(--panel-soft)] hover:text-[var(--ink)]"
+                      title="Rename"
+                    >
+                      ✎
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDelete(p.id)}
+                      aria-label="Delete project"
+                      className="rounded p-1 text-rose-500 hover:bg-rose-50"
+                      title="Delete"
+                    >
+                      ×
+                    </button>
+                  </div>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </aside>
   );
 }
 
