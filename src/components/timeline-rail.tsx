@@ -44,6 +44,8 @@ export type TimelineRailProps = {
   targetSeconds: number;
   onTargetSecondsChange: (seconds: number) => void;
   onLibraryDrop: (libraryId: string, atIndex: number) => void;
+  selectedClipId?: string | null;
+  onSelectClip?: (id: string | null) => void;
 };
 
 export function TimelineRail({
@@ -63,6 +65,8 @@ export function TimelineRail({
   targetSeconds,
   onTargetSecondsChange,
   onLibraryDrop,
+  selectedClipId,
+  onSelectClip,
 }: TimelineRailProps) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -262,7 +266,7 @@ export function TimelineRail({
       <div
         className={`rounded-[24px] border-2 border-dashed px-6 py-10 text-center text-sm leading-6 transition ${
           isHovering
-            ? "border-[var(--accent)] bg-[#eef9f7] text-[var(--accent-strong)]"
+            ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent-strong)]"
             : "border-[var(--line)] bg-white/40 text-[var(--muted)]"
         }`}
         onDragOver={(e) => {
@@ -290,22 +294,22 @@ export function TimelineRail({
 
   return (
     <div className="grid gap-4">
-      <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl bg-[#f7f4ec] px-4 py-3 text-sm leading-6">
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] px-3 py-2 text-xs leading-5">
         <div className="flex items-center gap-3">
-          <span className="font-semibold text-[var(--accent-strong)]">
+          <span className="font-medium text-[var(--ink-soft)]">
             Total {totalSeconds ? `${totalSeconds.toFixed(1)}s` : "—"}
           </span>
           <span className="text-[var(--muted)]">
-            ({totalBeats} beats · target {targetSeconds}s)
+            {totalBeats} beats · target {targetSeconds}s
           </span>
           {clamp === "under" ? (
-            <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700">
-              Under {MIN_REEL_SECONDS}s — add or extend clips
+            <span className="rounded-md bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700">
+              Under {MIN_REEL_SECONDS}s
             </span>
           ) : null}
           {clamp === "over" ? (
-            <span className="rounded-full bg-rose-100 px-2 py-0.5 text-xs font-semibold text-rose-700">
-              Over {MAX_REEL_SECONDS}s — trim or remove
+            <span className="rounded-md bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-700">
+              Over {MAX_REEL_SECONDS}s
             </span>
           ) : null}
         </div>
@@ -313,19 +317,19 @@ export function TimelineRail({
           <label className="flex items-center gap-2">
             <span className="text-[var(--muted)]">Target</span>
             <input
-              className="w-32"
+              className="w-28"
               max={MAX_REEL_SECONDS}
               min={MIN_REEL_SECONDS}
               onChange={(e) => onTargetSecondsChange(Number(e.target.value))}
               type="range"
               value={targetSeconds}
             />
-            <span className="w-8 text-right font-semibold text-[var(--accent-strong)]">
+            <span className="w-8 text-right font-medium text-[var(--ink-soft)]">
               {targetSeconds}s
             </span>
           </label>
           <button
-            className="rounded-full bg-[var(--accent)] px-4 py-1.5 text-sm font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:opacity-50"
+            className="rounded-md bg-[var(--accent)] px-3 py-1 text-xs font-medium text-white transition hover:bg-[var(--accent-strong)] disabled:opacity-50"
             disabled={!beatPeriodSeconds || timeline.length === 0}
             onClick={onAutoFit}
             type="button"
@@ -336,7 +340,7 @@ export function TimelineRail({
       </div>
 
       <div
-        className="overflow-hidden rounded-[24px] border border-white/5 bg-[#0f172a] p-4"
+        className="overflow-hidden rounded-[24px] border border-[var(--line)] bg-white/60 p-4"
         onDragLeave={handleDragLeaveRail}
         onDragOver={handleDragOverRail}
         onDrop={handleDropRail}
@@ -376,9 +380,11 @@ export function TimelineRail({
                     <SortableClip
                       beatPeriodSeconds={beatPeriodSeconds}
                       index={index}
+                      isSelected={selectedClipId === item.id}
                       item={item}
                       key={item.id}
                       onRemove={onRemove}
+                      onSelect={onSelectClip}
                       onSetTrim={onSetTrim}
                       pxPerBeat={pxPerBeat}
                       totalSecondsClamp={clamp}
@@ -390,14 +396,14 @@ export function TimelineRail({
             </DndContext>
 
             <div
-              className="pointer-events-none absolute top-0 bottom-0 z-20 w-0.5 bg-rose-400 shadow-[0_0_8px_rgba(244,114,182,0.6)]"
+              className="pointer-events-none absolute top-0 bottom-0 z-20 w-px bg-[var(--accent)]"
               style={{ left: `${playheadPx}px` }}
             >
-              <div className="absolute -top-1 left-1/2 h-3 w-3 -translate-x-1/2 rotate-45 bg-rose-400" />
+              <div className="absolute -top-1 left-1/2 h-2.5 w-2.5 -translate-x-1/2 rotate-45 bg-[var(--accent)]" />
             </div>
           </div>
         ) : (
-          <p className="text-sm text-emerald-100/70">
+          <p className="text-xs text-[var(--muted)]">
             Detecting BPM — beat grid will appear once analysis completes.
           </p>
         )}
@@ -418,7 +424,7 @@ function BeatTickRail({ totalBeats, beatPeriodSeconds, pxPerBeat }: BeatTickRail
   const ticks = Array.from({ length: totalBeats + 1 }, (_, i) => i);
   return (
     <div
-      className="relative h-6 select-none border-b border-white/10"
+      className="relative h-6 select-none border-b border-[var(--line)]"
       style={{ width: `${totalBeats * pxPerBeat}px` }}
     >
       {ticks.map((i) => {
@@ -430,10 +436,10 @@ function BeatTickRail({ totalBeats, beatPeriodSeconds, pxPerBeat }: BeatTickRail
             style={{ left: `${i * pxPerBeat}px`, transform: "translateX(-50%)" }}
           >
             <div
-              className={`w-px ${isLabel ? "h-5 bg-emerald-300" : "h-3 bg-white/30"}`}
+              className={`w-px ${isLabel ? "h-5 bg-[var(--accent)]" : "h-3 bg-[var(--muted)]/40"}`}
             />
             {isLabel ? (
-              <span className="mt-0.5 text-[10px] font-mono text-emerald-300/80">
+              <span className="mt-0.5 text-[10px] font-mono text-[var(--muted)]">
                 {(i * beatPeriodSeconds).toFixed(1)}s
               </span>
             ) : null}
@@ -452,6 +458,8 @@ type SortableClipProps = {
   onSetTrim: (id: string, startBeats: number, beats: number) => void;
   onRemove: (id: string) => void;
   pxPerBeat: number;
+  isSelected: boolean;
+  onSelect?: (id: string | null) => void;
 };
 
 function maxBeatsFor(
@@ -471,6 +479,8 @@ function SortableClip({
   onSetTrim,
   onRemove,
   pxPerBeat,
+  isSelected,
+  onSelect,
 }: SortableClipProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } =
     useSortable({ id: item.id });
@@ -560,7 +570,17 @@ function SortableClip({
   return (
     <div
       ref={setNodeRef}
-      className="group relative flex h-16 shrink-0 overflow-hidden rounded-lg border border-emerald-400/30 bg-black/40 text-white"
+      className={`group relative flex h-16 shrink-0 overflow-hidden rounded-md border bg-[var(--panel-soft)] text-[var(--ink-soft)] transition ${
+        isSelected
+          ? "border-[var(--accent)] ring-2 ring-[var(--accent)]/40"
+          : "border-[var(--line)]"
+      }`}
+      onClick={(e) => {
+        // Don't intercept clicks on the trim handles or remove button.
+        if ((e.target as HTMLElement).closest("[data-no-select]")) return;
+        e.stopPropagation();
+        onSelect?.(isSelected ? null : item.id);
+      }}
       style={style}
     >
       {item.kind === "video" && item.previewFrames && item.previewFrames.length > 0 ? (
@@ -568,7 +588,7 @@ function SortableClip({
       ) : item.kind === "image" ? (
         <img alt={item.name} className="h-full w-full object-cover" draggable={false} src={item.src} />
       ) : (
-        <div className="flex h-full w-full items-center justify-center text-[10px] text-emerald-200/60">
+        <div className="flex h-full w-full items-center justify-center text-[10px] text-[var(--muted)]">
           Loading…
         </div>
       )}
@@ -579,12 +599,13 @@ function SortableClip({
         {...listeners}
       />
 
-      <div className="pointer-events-none absolute left-1 top-1 z-10 rounded bg-black/55 px-1 text-[9px] font-mono text-emerald-100">
+      <div className="pointer-events-none absolute left-1 top-1 z-10 rounded bg-black/40 px-1 text-[9px] font-mono text-white/90">
         #{index + 1}
       </div>
       <button
         aria-label="Remove"
-        className="absolute right-1 top-1 z-20 rounded bg-black/55 px-1 text-[10px] text-rose-200 opacity-0 transition hover:bg-rose-500/70 hover:text-white group-hover:opacity-100"
+        className="absolute right-1 top-1 z-20 rounded bg-black/40 px-1 text-[10px] text-white/90 opacity-0 transition hover:bg-rose-500/80 group-hover:opacity-100"
+        data-no-select
         onClick={(e) => {
           e.stopPropagation();
           onRemove(item.id);
@@ -596,19 +617,21 @@ function SortableClip({
 
       <div
         aria-label="Drag left edge to resize"
-        className={`absolute left-0 top-0 z-30 flex h-full w-2 cursor-ew-resize items-center justify-center bg-emerald-300/25 hover:bg-emerald-300/60 ${atMin && (item.kind !== "video" || atFront) ? "opacity-30" : ""}`}
+        className={`absolute left-0 top-0 z-30 flex h-full w-2 cursor-ew-resize items-center justify-center bg-[var(--accent)]/35 hover:bg-[var(--accent)]/65 ${atMin && (item.kind !== "video" || atFront) ? "opacity-30" : ""}`}
+        data-no-select
         onClick={(e) => e.stopPropagation()}
         onPointerDown={(e) => startResize("left", e)}
       >
-        <span className="h-6 w-0.5 rounded-full bg-emerald-100/90" />
+        <span className="h-6 w-0.5 rounded-full bg-white/90" />
       </div>
       <div
         aria-label="Drag right edge to resize"
-        className={`absolute right-0 top-0 z-30 flex h-full w-2 cursor-ew-resize items-center justify-center bg-emerald-300/25 hover:bg-emerald-300/60 ${atMax || reelOver ? "opacity-30" : ""}`}
+        className={`absolute right-0 top-0 z-30 flex h-full w-2 cursor-ew-resize items-center justify-center bg-[var(--accent)]/35 hover:bg-[var(--accent)]/65 ${atMax || reelOver ? "opacity-30" : ""}`}
+        data-no-select
         onClick={(e) => e.stopPropagation()}
         onPointerDown={(e) => startResize("right", e)}
       >
-        <span className="h-6 w-0.5 rounded-full bg-emerald-100/90" />
+        <span className="h-6 w-0.5 rounded-full bg-white/90" />
       </div>
     </div>
   );
@@ -643,7 +666,7 @@ function DropIndicator({ leftPx }: { leftPx: number }) {
   return (
     <div
       data-drop-indicator
-      className="pointer-events-none absolute top-0 bottom-0 z-30 w-1 -translate-x-1/2 rounded-full bg-emerald-300 shadow-[0_0_12px_rgba(110,231,183,0.85)]"
+      className="pointer-events-none absolute top-0 bottom-0 z-30 w-0.5 -translate-x-1/2 rounded-full bg-[var(--accent)]"
       style={{ left: `${leftPx}px` }}
     />
   );

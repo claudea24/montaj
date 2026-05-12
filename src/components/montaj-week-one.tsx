@@ -38,12 +38,24 @@ function maxBeatsFor(item: TimelineMedia, beatPeriodSeconds: number | null): num
   return Math.max(1, Math.floor(item.durationSeconds / beatPeriodSeconds));
 }
 
+type NavSection =
+  | "media"
+  | "audio"
+  | "text"
+  | "captions"
+  | "effects"
+  | "transitions"
+  | "filters"
+  | "export";
+
 export function MontajWeekOne() {
   const [timeline, setTimeline] = useState<TimelineMedia[]>([]);
   const [library, setLibrary] = useState<TimelineMedia[]>([]);
   const [selectedTrack, setSelectedTrack] = useState<MusicTrack>(MUSIC_LIBRARY[0]);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [navSection, setNavSection] = useState<NavSection>("media");
+  const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string>(
     getStorageStatus().configured
       ? "Supabase storage is configured. Uploaded images will also be persisted."
@@ -358,167 +370,37 @@ export function MontajWeekOne() {
     }
   }
 
+  const selectedClip =
+    selectedClipId == null ? null : timeline.find((it) => it.id === selectedClipId) ?? null;
+
   return (
-    <main className="mx-auto flex h-screen w-full max-w-[1600px] flex-col gap-3 px-4 py-3 md:px-6">
-      <header className="flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <p className="text-xs uppercase tracking-[0.3em] text-[var(--accent)]">
-            Montaj
-          </p>
-          <h1 className="text-2xl leading-tight md:text-3xl">
-            Beat-locked reel editor
-          </h1>
-          <p className="text-sm leading-6 text-[var(--muted)]">
-            CapCut-style timeline · {MIN_REEL_SECONDS}–{MAX_REEL_SECONDS}s reels ·
-            edits snap to the song&apos;s beat grid.
-          </p>
-        </div>
-        <div className="rounded-2xl bg-[#f7f4ec] px-4 py-2 text-xs leading-5 text-[var(--muted)]">
-          <p>
-            <span className="font-semibold text-[var(--accent-strong)]">
-              {timeline.length}
-            </span>{" "}
-            items · {timeline.length - videoCount} photos · {videoCount} clips ·{" "}
-            {formatBytes(totalSize)}
-          </p>
-          <p>
-            <span className="font-semibold text-[var(--accent-strong)]">
-              {selectedTrack.name}
-            </span>
-            {" · "}
-            {beatStatus === "running"
-              ? "detecting BPM…"
-              : beatGrid
-                ? `${beatGrid.bpm} BPM`
-                : beatStatus === "error"
-                  ? "BPM detect failed"
-                  : "—"}
-            {" · "}
-            <span className="font-semibold">{totalSeconds.toFixed(1)}s</span>
-          </p>
-        </div>
-      </header>
+    <main className="flex h-screen w-full overflow-hidden bg-[var(--bg)] text-[var(--ink)]">
+      <LeftNav active={navSection} onChange={setNavSection} />
 
-      <section className="flex min-h-0 flex-1 gap-3">
-        <aside className="flex w-[320px] shrink-0 flex-col gap-3 overflow-y-auto pr-1">
-          <section className="rounded-[24px] border border-[var(--line)] bg-[var(--panel)] p-4 shadow-[var(--shadow)]">
-            <div className="flex items-center justify-between gap-3">
-              <h2 className="text-base font-semibold">Upload</h2>
-              <button
-                className="cursor-pointer rounded-full bg-[var(--accent)] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[var(--accent-strong)]"
-                onClick={() => fileInputRef.current?.click()}
-                type="button"
-              >
-                Choose
-              </button>
-              <input
-                accept="image/png,image/jpeg,image/webp,image/heic,image/heif,.heic,.heif,video/quicktime,video/mp4,.mov,.mp4,.m4v"
-                className="sr-only"
-                multiple
-                onChange={(event) => {
-                  void handleFiles(event.target.files);
-                  // Reset so picking the same file twice in a row still fires onChange.
-                  event.target.value = "";
-                }}
-                ref={fileInputRef}
-                type="file"
-              />
-            </div>
-            <div
-              className={`mt-3 rounded-[18px] border-2 border-dashed px-3 py-3 text-center text-xs leading-5 transition ${
-                isDragging
-                  ? "border-[var(--accent)] bg-[#eef9f7]"
-                  : "border-[var(--line)] bg-white/60 text-[var(--muted)]"
-              }`}
-              onDragLeave={() => setIsDragging(false)}
-              onDragOver={(event) => {
-                event.preventDefault();
-                setIsDragging(true);
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                setIsDragging(false);
-                void handleFiles(event.dataTransfer.files);
-              }}
-            >
-              {isUploading ? "Uploading…" : "Drop files to add to library"}
-            </div>
-            {library.length > 0 ? (
-              <ul
-                className="mt-3 grid max-h-[280px] grid-cols-2 gap-2 overflow-y-auto pr-1"
-                data-library-list
-              >
-                {library.map((item) => (
-                  <LibraryCard
-                    item={item}
-                    key={item.id}
-                    onRemove={removeLibraryItem}
-                  />
-                ))}
-              </ul>
-            ) : null}
-            <p className="mt-2 text-xs leading-5 text-[var(--muted)]">{statusMessage}</p>
-          </section>
+      <MediaPanel
+        aiMessage={aiMessage}
+        aiStatus={aiStatus}
+        beatGrid={beatGrid}
+        beatStatus={beatStatus}
+        fileInputRef={fileInputRef}
+        isDragging={isDragging}
+        isUploading={isUploading}
+        library={library}
+        onFiles={handleFiles}
+        onRemoveLibrary={removeLibraryItem}
+        onRunAi={runAIAnalysis}
+        onSelectTrack={setSelectedTrack}
+        onSetDragging={setIsDragging}
+        section={navSection}
+        selectedTrack={selectedTrack}
+        statusMessage={statusMessage}
+        timelineLength={timeline.length}
+      />
 
-          <section className="rounded-[24px] border border-[var(--line)] bg-[var(--panel)] p-4 shadow-[var(--shadow)]">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="text-base font-semibold">Soundtrack</h2>
-              <span className="rounded-full bg-[#f7f4ec] px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-[var(--accent-strong)]">
-                {selectedTrack.mood}
-              </span>
-            </div>
-            <div className="mt-3 grid max-h-[240px] gap-1.5 overflow-y-auto pr-1">
-              {MUSIC_LIBRARY.map((track) => {
-                const active = track.id === selectedTrack.id;
-                return (
-                  <button
-                    className={`rounded-xl border px-3 py-2 text-left text-xs transition ${
-                      active
-                        ? "border-[var(--accent)] bg-[#eef9f7]"
-                        : "border-[var(--line)] bg-white/60 hover:border-[var(--accent)]"
-                    }`}
-                    key={track.id}
-                    onClick={() => setSelectedTrack(track)}
-                    type="button"
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-semibold">{track.name}</span>
-                      <span className="text-[10px] text-[var(--muted)]">{track.mood}</span>
-                    </div>
-                    <p className="mt-0.5 text-[11px] leading-4 text-[var(--muted)]">
-                      {track.description}
-                    </p>
-                  </button>
-                );
-              })}
-            </div>
-            <audio
-              className="mt-3 w-full"
-              controls
-              key={selectedTrack.id}
-              src={selectedTrack.src}
-            />
-          </section>
-
-          <section className="rounded-[24px] border border-[var(--line)] bg-[var(--panel)] p-4 shadow-[var(--shadow)]">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="text-base font-semibold">AI director</h2>
-              <button
-                className="rounded-full bg-[var(--accent)] px-3 py-1 text-xs font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:opacity-50"
-                disabled={aiStatus === "running" || timeline.length === 0}
-                onClick={() => void runAIAnalysis()}
-                type="button"
-              >
-                {aiStatus === "running" ? "Working…" : "Auto-pick"}
-              </button>
-            </div>
-            <p className="mt-2 text-xs leading-5 text-[var(--muted)]">{aiMessage}</p>
-          </section>
-        </aside>
-
-        <div className="flex min-h-0 flex-1 items-center justify-center rounded-[28px] border border-[var(--line)] bg-[#0b1220] p-3 shadow-[var(--shadow)]">
+      <section className="flex min-h-0 flex-1 flex-col gap-3 bg-[var(--bg-soft)] px-3 py-3">
+        <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-3">
           <div
-            className="overflow-hidden rounded-[20px] border border-white/5 bg-black"
+            className="overflow-hidden rounded-xl bg-[var(--panel-strong)]"
             style={{ height: "100%", aspectRatio: "9 / 16" }}
           >
             <Player
@@ -556,36 +438,52 @@ export function MontajWeekOne() {
             />
           </div>
         </div>
-      </section>
 
-      <PlaybackToolbar
-        currentFrame={currentFrame}
-        fps={FPS}
-        isPlaying={isPlaying}
-        onTogglePlay={togglePlay}
-        totalFrames={totalFrames}
-      />
-
-      <section className="shrink-0 rounded-[24px] border border-[var(--line)] bg-[var(--panel)] p-3 shadow-[var(--shadow)]">
-        <TimelineRail
-          beatPeriodSeconds={beatPeriodSeconds}
+        <PlaybackToolbar
           currentFrame={currentFrame}
           fps={FPS}
-          onAutoFit={autoFit}
-          onCaptionChange={setCaption}
-          onLibraryDrop={insertLibraryItem}
-          onRemove={removeItem}
-          onReorder={setTimeline}
-          onSeek={seekTo}
-          onSetTrim={setTrim}
-          onTargetSecondsChange={setTargetSeconds}
-          perSlotFrames={perSlotFrames}
-          targetSeconds={targetSeconds}
-          timeline={timeline}
-          totalDurationFrames={totalFrames}
-          transitionFrames={TRANSITION_FRAMES}
+          isPlaying={isPlaying}
+          onTogglePlay={togglePlay}
+          totalFrames={totalFrames}
         />
+
+        <section className="shrink-0 rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-3">
+          <TimelineRail
+            beatPeriodSeconds={beatPeriodSeconds}
+            currentFrame={currentFrame}
+            fps={FPS}
+            onAutoFit={autoFit}
+            onCaptionChange={setCaption}
+            onLibraryDrop={insertLibraryItem}
+            onRemove={(id) => {
+              if (id === selectedClipId) setSelectedClipId(null);
+              removeItem(id);
+            }}
+            onReorder={setTimeline}
+            onSeek={seekTo}
+            onSelectClip={setSelectedClipId}
+            onSetTrim={setTrim}
+            onTargetSecondsChange={setTargetSeconds}
+            perSlotFrames={perSlotFrames}
+            selectedClipId={selectedClipId}
+            targetSeconds={targetSeconds}
+            timeline={timeline}
+            totalDurationFrames={totalFrames}
+            transitionFrames={TRANSITION_FRAMES}
+          />
+        </section>
       </section>
+
+      <RightPanel
+        beatPeriodSeconds={beatPeriodSeconds}
+        clip={selectedClip}
+        onCaptionChange={setCaption}
+        onClose={() => setSelectedClipId(null)}
+        onRemove={(id) => {
+          setSelectedClipId(null);
+          removeItem(id);
+        }}
+      />
     </main>
   );
 }
@@ -606,27 +504,27 @@ function PlaybackToolbar({
   onTogglePlay,
 }: PlaybackToolbarProps) {
   return (
-    <div className="flex shrink-0 items-center justify-center gap-3 rounded-2xl border border-[var(--line)] bg-[var(--panel)] px-4 py-2 shadow-[var(--shadow)]">
+    <div className="flex shrink-0 items-center justify-center gap-3 rounded-xl border border-[var(--line)] bg-[var(--panel)] px-4 py-2">
       <button
         aria-label={isPlaying ? "Pause" : "Play"}
-        className="flex h-10 w-10 items-center justify-center rounded-full bg-[var(--accent)] text-white shadow transition hover:bg-[var(--accent-strong)]"
+        className="flex h-9 w-9 items-center justify-center rounded-full bg-[var(--accent)] text-white transition hover:bg-[var(--accent-strong)]"
         onClick={onTogglePlay}
         type="button"
       >
         {isPlaying ? (
-          <svg fill="currentColor" height="18" viewBox="0 0 24 24" width="18">
+          <svg fill="currentColor" height="16" viewBox="0 0 24 24" width="16">
             <rect height="14" rx="1" width="4" x="6" y="5" />
             <rect height="14" rx="1" width="4" x="14" y="5" />
           </svg>
         ) : (
-          <svg fill="currentColor" height="18" viewBox="0 0 24 24" width="18">
+          <svg fill="currentColor" height="16" viewBox="0 0 24 24" width="16">
             <path d="M8 5v14l11-7L8 5z" />
           </svg>
         )}
       </button>
-      <div className="font-mono text-sm text-[var(--accent-strong)]">
-        <span className="font-semibold">{formatTimecode(currentFrame / fps)}</span>
-        <span className="mx-1 text-[var(--muted)]">|</span>
+      <div className="font-mono text-sm text-[var(--ink-soft)]">
+        <span className="font-medium">{formatTimecode(currentFrame / fps)}</span>
+        <span className="mx-1 text-[var(--muted)]">/</span>
         <span className="text-[var(--muted)]">{formatTimecode(totalFrames / fps)}</span>
       </div>
     </div>
@@ -655,7 +553,7 @@ function LibraryCard({ item, onRemove }: LibraryCardProps) {
     : item.previewFrames?.[Math.floor((item.previewFrames.length - 1) / 2)] ?? null;
   return (
     <li
-      className="group relative cursor-grab overflow-hidden rounded-lg border border-[var(--line)] bg-zinc-900 text-xs transition hover:border-[var(--accent)] active:cursor-grabbing"
+      className="group relative cursor-grab overflow-hidden rounded-lg border border-[var(--line)] bg-[var(--panel)] text-xs transition hover:border-[var(--line-strong)] active:cursor-grabbing"
       draggable
       onDragEnd={(e) => {
         e.currentTarget.classList.remove("opacity-50");
@@ -667,29 +565,29 @@ function LibraryCard({ item, onRemove }: LibraryCardProps) {
         e.currentTarget.classList.add("opacity-50");
       }}
     >
-      <div className="relative aspect-[4/3] w-full bg-zinc-800">
+      <div className="relative aspect-[4/3] w-full bg-[var(--panel-soft)]">
         {posterSrc ? (
           <img alt="" className="h-full w-full object-cover" draggable={false} src={posterSrc} />
         ) : item.kind === "video" ? (
-          <div className="flex h-full w-full items-center justify-center text-[11px] font-semibold text-white/40">
+          <div className="flex h-full w-full items-center justify-center text-[11px] font-medium text-[var(--muted)]">
             Loading…
           </div>
         ) : null}
         {duration ? (
-          <span className="absolute bottom-1 left-1 rounded bg-black/60 px-1 py-0.5 font-mono text-[10px] text-white">
+          <span className="absolute bottom-1 left-1 rounded bg-black/55 px-1 py-0.5 font-mono text-[10px] text-white">
             {duration}
           </span>
         ) : null}
         <button
           aria-label={`Remove ${item.name} from library`}
-          className="absolute right-1 top-1 rounded-full bg-black/60 px-1.5 text-[10px] text-white opacity-0 transition hover:bg-rose-500 group-hover:opacity-100"
+          className="absolute right-1 top-1 rounded-md bg-black/55 px-1.5 text-[10px] text-white opacity-0 transition hover:bg-rose-500 group-hover:opacity-100"
           onClick={() => onRemove(item.id)}
           type="button"
         >
           ✕
         </button>
       </div>
-      <div className="truncate px-1.5 py-1 text-[10px] text-[var(--accent-strong)]">{item.name}</div>
+      <div className="truncate px-2 py-1 text-[10px] text-[var(--ink-soft)]">{item.name}</div>
     </li>
   );
 }
@@ -698,4 +596,314 @@ function formatDurationLabel(seconds: number): string {
   const mm = Math.floor(seconds / 60);
   const ss = Math.floor(seconds % 60);
   return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+}
+
+const NAV_ITEMS: { id: NavSection; label: string; icon: string }[] = [
+  { id: "media", label: "Media", icon: "▦" },
+  { id: "audio", label: "Audio", icon: "♪" },
+  { id: "text", label: "Text", icon: "T" },
+  { id: "captions", label: "Captions", icon: "❝" },
+  { id: "effects", label: "Effects", icon: "✶" },
+  { id: "transitions", label: "Transitions", icon: "⇆" },
+  { id: "filters", label: "Filters", icon: "◐" },
+  { id: "export", label: "Export", icon: "↑" },
+];
+
+function LeftNav({
+  active,
+  onChange,
+}: {
+  active: NavSection;
+  onChange: (id: NavSection) => void;
+}) {
+  return (
+    <nav className="flex w-[72px] shrink-0 flex-col items-stretch gap-1 border-r border-[var(--line)] bg-[var(--panel)] py-3">
+      <div className="mb-2 px-2 text-center text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--accent)]">
+        Montaj
+      </div>
+      {NAV_ITEMS.map((it) => {
+        const isActive = it.id === active;
+        return (
+          <button
+            aria-label={it.label}
+            aria-pressed={isActive}
+            className={`mx-2 flex flex-col items-center gap-0.5 rounded-lg px-1 py-2 text-[10px] transition ${
+              isActive
+                ? "bg-[var(--accent-soft)] text-[var(--accent-strong)]"
+                : "text-[var(--muted)] hover:bg-[var(--panel-soft)] hover:text-[var(--ink)]"
+            }`}
+            key={it.id}
+            onClick={() => onChange(it.id)}
+            type="button"
+          >
+            <span className="text-base leading-none">{it.icon}</span>
+            <span className="font-medium tracking-wide">{it.label}</span>
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
+
+type MediaPanelProps = {
+  aiMessage: string;
+  aiStatus: "idle" | "running" | "ok" | "error";
+  beatGrid: BeatGrid | null;
+  beatStatus: "idle" | "running" | "ok" | "error";
+  fileInputRef: React.RefObject<HTMLInputElement | null>;
+  isDragging: boolean;
+  isUploading: boolean;
+  library: TimelineMedia[];
+  onFiles: (files: FileList | null) => void | Promise<void>;
+  onRemoveLibrary: (id: string) => void;
+  onRunAi: () => void | Promise<void>;
+  onSelectTrack: (t: MusicTrack) => void;
+  onSetDragging: (v: boolean) => void;
+  section: NavSection;
+  selectedTrack: MusicTrack;
+  statusMessage: string;
+  timelineLength: number;
+};
+
+function MediaPanel(props: MediaPanelProps) {
+  const {
+    aiMessage,
+    aiStatus,
+    beatGrid,
+    beatStatus,
+    fileInputRef,
+    isDragging,
+    isUploading,
+    library,
+    onFiles,
+    onRemoveLibrary,
+    onRunAi,
+    onSelectTrack,
+    onSetDragging,
+    section,
+    selectedTrack,
+    statusMessage,
+    timelineLength,
+  } = props;
+
+  return (
+    <aside className="flex w-[300px] shrink-0 flex-col border-r border-[var(--line)] bg-[var(--panel)]">
+      <div className="flex shrink-0 items-center justify-between border-b border-[var(--line)] px-4 py-3">
+        <h2 className="text-sm font-medium capitalize text-[var(--ink-soft)]">{section}</h2>
+        {section === "media" ? (
+          <>
+            <button
+              className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-[var(--accent-strong)]"
+              onClick={() => fileInputRef.current?.click()}
+              type="button"
+            >
+              + Upload
+            </button>
+            <input
+              accept="image/png,image/jpeg,image/webp,image/heic,image/heif,.heic,.heif,video/quicktime,video/mp4,.mov,.mp4,.m4v"
+              className="sr-only"
+              multiple
+              onChange={(e) => {
+                void onFiles(e.target.files);
+                e.target.value = "";
+              }}
+              ref={fileInputRef}
+              type="file"
+            />
+          </>
+        ) : null}
+      </div>
+
+      <div className="flex min-h-0 flex-1 flex-col overflow-y-auto p-3">
+        {section === "media" ? (
+          <>
+            <div
+              className={`rounded-lg border border-dashed px-3 py-3 text-center text-xs leading-5 transition ${
+                isDragging
+                  ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent-strong)]"
+                  : "border-[var(--line-strong)] bg-[var(--panel-soft)] text-[var(--muted)]"
+              }`}
+              onDragLeave={() => onSetDragging(false)}
+              onDragOver={(e) => {
+                e.preventDefault();
+                onSetDragging(true);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                onSetDragging(false);
+                void onFiles(e.dataTransfer.files);
+              }}
+            >
+              {isUploading ? "Uploading…" : "Drop files here"}
+            </div>
+            {library.length > 0 ? (
+              <ul className="mt-3 grid grid-cols-2 gap-2" data-library-list>
+                {library.map((item) => (
+                  <LibraryCard
+                    item={item}
+                    key={item.id}
+                    onRemove={onRemoveLibrary}
+                  />
+                ))}
+              </ul>
+            ) : null}
+            <p className="mt-3 text-[11px] leading-4 text-[var(--muted)]">{statusMessage}</p>
+          </>
+        ) : null}
+
+        {section === "audio" ? (
+          <>
+            <div className="grid gap-1.5">
+              {MUSIC_LIBRARY.map((track) => {
+                const active = track.id === selectedTrack.id;
+                return (
+                  <button
+                    className={`rounded-lg border px-3 py-2 text-left text-xs transition ${
+                      active
+                        ? "border-[var(--accent)] bg-[var(--accent-soft)]"
+                        : "border-[var(--line)] bg-[var(--panel-soft)] hover:border-[var(--line-strong)]"
+                    }`}
+                    key={track.id}
+                    onClick={() => onSelectTrack(track)}
+                    type="button"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold">{track.name}</span>
+                      <span className="text-[10px] text-[var(--muted)]">{track.mood}</span>
+                    </div>
+                    <p className="mt-0.5 text-[11px] leading-4 text-[var(--muted)]">
+                      {track.description}
+                    </p>
+                  </button>
+                );
+              })}
+            </div>
+            <audio
+              className="mt-3 w-full"
+              controls
+              key={selectedTrack.id}
+              src={selectedTrack.src}
+            />
+            <p className="mt-3 text-[11px] leading-4 text-[var(--muted)]">
+              {beatStatus === "running"
+                ? "Detecting BPM…"
+                : beatGrid
+                  ? `${beatGrid.bpm} BPM detected`
+                  : beatStatus === "error"
+                    ? "BPM detection failed"
+                    : "—"}
+            </p>
+          </>
+        ) : null}
+
+        {section === "captions" ? (
+          <div className="grid gap-2">
+            <button
+              className="rounded-full bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:opacity-50"
+              disabled={aiStatus === "running" || timelineLength === 0}
+              onClick={() => void onRunAi()}
+              type="button"
+            >
+              {aiStatus === "running" ? "Working…" : "Auto-caption with AI"}
+            </button>
+            <p className="text-[11px] leading-4 text-[var(--muted)]">{aiMessage}</p>
+          </div>
+        ) : null}
+
+        {section !== "media" && section !== "audio" && section !== "captions" ? (
+          <div className="rounded-lg border border-dashed border-[var(--line-strong)] bg-[var(--panel-soft)] p-6 text-center text-xs leading-5 text-[var(--muted)]">
+            {section.charAt(0).toUpperCase() + section.slice(1)} coming soon.
+          </div>
+        ) : null}
+      </div>
+    </aside>
+  );
+}
+
+type RightPanelProps = {
+  clip: TimelineMedia | null;
+  beatPeriodSeconds: number | null;
+  onCaptionChange: (id: string, text: string) => void;
+  onRemove: (id: string) => void;
+  onClose: () => void;
+};
+
+function RightPanel({
+  clip,
+  beatPeriodSeconds,
+  onCaptionChange,
+  onRemove,
+  onClose,
+}: RightPanelProps) {
+  if (!clip) return null;
+  const seconds = clip.beats != null && beatPeriodSeconds
+    ? clip.beats * beatPeriodSeconds
+    : clip.durationSeconds ?? null;
+  return (
+    <aside className="flex w-[300px] shrink-0 flex-col border-l border-[var(--line)] bg-[var(--panel)]">
+      <div className="flex shrink-0 items-center justify-between border-b border-[var(--line)] px-4 py-3">
+        <h2 className="truncate text-sm font-medium text-[var(--ink-soft)]" title={clip.name}>{clip.name}</h2>
+        <button
+          aria-label="Close panel"
+          className="rounded-md p-1 text-[var(--muted)] hover:bg-[var(--panel-soft)] hover:text-[var(--ink)]"
+          onClick={onClose}
+          type="button"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4 text-xs">
+        <div className="grid gap-1">
+          <div className="text-[10px] uppercase tracking-wider text-[var(--muted)]">Type</div>
+          <div className="font-medium">{clip.kind}</div>
+        </div>
+        {seconds != null ? (
+          <div className="grid gap-1">
+            <div className="text-[10px] uppercase tracking-wider text-[var(--muted)]">Active length</div>
+            <div className="font-medium">{seconds.toFixed(1)}s · {clip.beats ?? "—"} beats</div>
+          </div>
+        ) : null}
+        {clip.kind === "video" && clip.durationSeconds != null ? (
+          <div className="grid gap-1">
+            <div className="text-[10px] uppercase tracking-wider text-[var(--muted)]">Source length</div>
+            <div className="font-medium">{clip.durationSeconds.toFixed(1)}s</div>
+          </div>
+        ) : null}
+
+        <label className="mt-1 grid gap-1">
+          <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">Caption</span>
+          <input
+            className="rounded-md border border-[var(--line)] bg-[var(--panel-soft)] px-2 py-1.5 text-xs focus:border-[var(--accent)] focus:outline-none"
+            onChange={(e) => onCaptionChange(clip.id, e.target.value)}
+            placeholder="Add caption…"
+            type="text"
+            value={clip.caption ?? ""}
+          />
+        </label>
+
+        <PlaceholderRow label="Speed" />
+        <PlaceholderRow label="Volume" />
+        <PlaceholderRow label="Filters" />
+        <PlaceholderRow label="Animation" />
+        <PlaceholderRow label="Adjust" />
+
+        <button
+          className="mt-2 rounded-md border border-[var(--line)] bg-[var(--panel-soft)] px-2 py-1.5 text-xs font-medium text-rose-600 transition hover:bg-rose-50 hover:text-rose-700"
+          onClick={() => onRemove(clip.id)}
+          type="button"
+        >
+          Delete clip
+        </button>
+      </div>
+    </aside>
+  );
+}
+
+function PlaceholderRow({ label }: { label: string }) {
+  return (
+    <div className="flex items-center justify-between rounded-md border border-[var(--line)] bg-[var(--panel-soft)] px-2 py-1.5">
+      <span className="font-medium">{label}</span>
+      <span className="text-[10px] text-[var(--muted)]">soon</span>
+    </div>
+  );
 }
