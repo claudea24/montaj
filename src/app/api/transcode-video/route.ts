@@ -6,7 +6,15 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
+import ffmpegInstaller from "@ffmpeg-installer/ffmpeg";
+import ffprobeInstaller from "@ffprobe-installer/ffprobe";
 import type { NextRequest } from "next/server";
+
+// Bundled static binaries — work both locally and on Vercel (whose runtime
+// has no system ffmpeg on PATH). The installer packages ship platform-
+// specific binaries selected via optionalDependencies at install time.
+const FFMPEG_BIN = ffmpegInstaller.path;
+const FFPROBE_BIN = ffprobeInstaller.path;
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -171,7 +179,7 @@ function sanitizeName(name: string) {
 
 function probeVideo(inputPath: string): Promise<ProbeResult> {
   return new Promise((resolve) => {
-    const proc = spawn("ffprobe", [
+    const proc = spawn(FFPROBE_BIN, [
       "-v",
       "error",
       "-show_entries",
@@ -213,7 +221,7 @@ function probeVideo(inputPath: string): Promise<ProbeResult> {
 
 function runFfmpeg(args: string[]): Promise<void> {
   return new Promise((resolve, reject) => {
-    const proc = spawn("ffmpeg", args);
+    const proc = spawn(FFMPEG_BIN, args);
     let stderr = "";
     proc.stderr.on("data", (chunk) => {
       stderr += chunk;

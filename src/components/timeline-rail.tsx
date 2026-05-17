@@ -1,6 +1,11 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+
+// useLayoutEffect logs an SSR warning on the server. Client component but
+// Next.js still renders it during the server pass.
+const useIsoLayoutEffect =
+  typeof window === "undefined" ? useEffect : useLayoutEffect;
 import {
   DndContext,
   PointerSensor,
@@ -83,14 +88,18 @@ export function TimelineRail({
   const [containerWidth, setContainerWidth] = useState(0);
   const [zoom, setZoom] = useState(1);
 
-  useEffect(() => {
+  // useLayoutEffect runs synchronously after DOM mutation but BEFORE paint,
+  // so containerWidth is set before the user ever sees the rail. Without
+  // this, the first paint uses width=0 → fitPxPerBeat falls back to a large
+  // value → railWidth blows out → the container scrolls. Re-using
+  // clientWidth (which includes padding, like our subtract assumes) keeps
+  // the resize path consistent with the initial measurement.
+  useIsoLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    setContainerWidth(el.clientWidth);
-    const ro = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width ?? el.clientWidth;
-      setContainerWidth(w);
-    });
+    const measure = () => setContainerWidth(el.clientWidth);
+    measure();
+    const ro = new ResizeObserver(measure);
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
@@ -201,10 +210,12 @@ export function TimelineRail({
   // if they exceed it) into the visible rail. The actual px-per-beat is this
   // value scaled by `zoom`; when zoom > 1 (or when the fit value falls below
   // the floor) the rail becomes wider than the container and the outer
-  // wrapper scrolls horizontally.
+  // wrapper scrolls horizontally. When the container hasn't been measured
+  // yet (initial render before useLayoutEffect commits), fall back to the
+  // floor so railWidth stays small instead of blowing out.
   const fitPxPerBeat = useMemo(() => {
     const available = Math.max(0, containerWidth - RAIL_PADDING_X * 2);
-    if (available === 0 || effectiveBeats <= 0) return 44;
+    if (available === 0 || effectiveBeats <= 0) return PX_PER_BEAT_FLOOR;
     return Math.max(PX_PER_BEAT_FLOOR, available / effectiveBeats);
   }, [containerWidth, effectiveBeats]);
 

@@ -533,8 +533,24 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
   const selectedClip =
     selectedClipId == null ? null : timeline.find((it) => it.id === selectedClipId) ?? null;
 
+  // Clicking anywhere outside the right panel dismisses it. Clip clicks
+  // already stopPropagation in the rail, so picking another clip still works.
+  const handleMainClick = useCallback(
+    (e: React.MouseEvent<HTMLElement>) => {
+      if (selectedClipId == null) return;
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      if (target.closest("[data-right-panel]")) return;
+      setSelectedClipId(null);
+    },
+    [selectedClipId],
+  );
+
   return (
-    <main className="relative flex h-screen w-full overflow-hidden bg-[var(--bg)] text-[var(--ink)]">
+    <main
+      className="relative flex h-screen w-full overflow-hidden bg-[var(--bg)] text-[var(--ink)]"
+      onClick={handleMainClick}
+    >
       <div className="pointer-events-auto absolute right-3 top-3 z-50 flex items-center gap-3">
         <span
           className={`rounded-md border px-2 py-1 text-[11px] font-medium ${
@@ -1300,7 +1316,10 @@ function RightPanel({
     ? clip.beats * beatPeriodSeconds
     : clip.durationSeconds ?? null;
   return (
-    <aside className="flex w-[300px] shrink-0 flex-col border-l border-[var(--line)] bg-[var(--panel)]">
+    <aside
+      data-right-panel
+      className="flex w-[300px] shrink-0 flex-col border-l border-[var(--line)] bg-[var(--panel)]"
+    >
       <div className="flex shrink-0 items-center justify-between border-b border-[var(--line)] px-4 py-3">
         <h2 className="truncate text-sm font-medium text-[var(--ink-soft)]" title={clip.name}>{clip.name}</h2>
         <button
