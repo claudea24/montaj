@@ -132,7 +132,11 @@ function isVideoFile(file: File) {
   return /\.(mov|mp4|m4v|webm)$/i.test(file.name);
 }
 
-async function transcodeIfHevc(file: File): Promise<File> {
+/** Posts the file to the server transcode route. The server returns 204 when
+ *  the input is already a clean MP4 (passthrough), an `x-transcoded: remux`
+ *  body when it just rewrote the container, or an `x-transcoded: reencode`
+ *  body when it had to fully re-encode (HEVC, VFR, etc.). */
+async function normalizeUploadedVideo(file: File): Promise<File> {
   const form = new FormData();
   form.append("video", file);
   let res: Response;
@@ -196,6 +200,28 @@ async function seekVideo(video: HTMLVideoElement, t: number) {
   await done;
 }
 
+/** Fire-and-forget thumbnail extraction for any video items that don't yet
+ *  have previewFrames. Calls `apply` per-item when frames are ready. Used on
+ *  project/library reload because previewFrames aren't persisted to the DB. */
+export function backfillVideoThumbnails(
+  items: TimelineMedia[],
+  apply: (id: string, frames: string[]) => void,
+) {
+  for (const item of items) {
+    if (item.kind !== "video") continue;
+    if (item.previewFrames && item.previewFrames.length > 0) continue;
+    if (!item.src) continue;
+    void extractVideoThumbnails(item.src, item.durationSeconds ?? 0)
+      .then((frames) => {
+        if (frames.length === 0) return;
+        apply(item.id, frames);
+      })
+      .catch(() => {
+        // No thumbnail = "Loading…" tile; harmless.
+      });
+  }
+}
+
 /** Pulls a small set of evenly-spaced JPEG thumbnails. Used only for static UI
  *  decoration (library tiles, rail filmstrip) — never on the playback path. */
 export async function extractVideoThumbnails(
@@ -206,6 +232,10 @@ export async function extractVideoThumbnails(
   video.muted = true;
   video.playsInline = true;
   video.preload = "auto";
+  // Opt into CORS mode so we can read pixels off cross-origin Supabase signed
+  // URLs without tainting the canvas. Local blob: URLs ignore this attribute.
+  // Must be set BEFORE assigning src.
+  video.crossOrigin = "anonymous";
   video.src = src;
   try {
     await waitForEvent(video, "loadedmetadata", "error");
@@ -266,7 +296,7 @@ async function prepareFile(file: File): Promise<PreparedMedia> {
   }
 
   if (isVideoFile(file)) {
-    const playable = await transcodeIfHevc(file);
+    const playable = await normalizeUploadedVideo(file);
     const src = URL.createObjectURL(playable);
     const durationSeconds = await probeVideoDuration(src);
     return {
@@ -294,7 +324,7 @@ async function prepareFile(file: File): Promise<PreparedMedia> {
   };
 }
 
-export type UploadContext = {
+type UploadContext = {
   supabase: SupabaseClient | null;
   userId: string | null;
   projectId: string | null;
@@ -387,14 +417,8 @@ export async function uploadFilesToSupabase(
   ctx: UploadContext,
   files: FileList | File[],
 ) {
-  return uploadFileArrayToSupabase(ctx, Array.from(files));
-}
-
-export async function uploadFileArrayToSupabase(
-  ctx: UploadContext,
-  files: File[],
-) {
-  const prepared = await Promise.all(files.map(prepareFile));
+  const fileArray = Array.from(files);
+  const prepared = await Promise.all(fileArray.map(prepareFile));
   const timeline = prepared.map((p) => p.timeline);
   const { supabase, userId, projectId } = ctx;
 

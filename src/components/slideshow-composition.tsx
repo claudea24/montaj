@@ -173,7 +173,9 @@ function SlotContent({ item, index, totalFrames, startFrom, caption }: SlotConte
     <AbsoluteFill style={{ alignItems: "center", justifyContent: "center" }}>
       {isVideo ? (
         <Video
-          acceptableTimeShiftInSeconds={10}
+          // Tight enough to resync on drift but loose enough that brief
+          // network/codec stalls don't cause stutter on every frame.
+          acceptableTimeShiftInSeconds={1}
           muted
           pauseWhenBuffering={false}
           src={item.src}

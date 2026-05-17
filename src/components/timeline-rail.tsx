@@ -18,12 +18,17 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import type { TimelineMedia } from "@/lib/media";
 
-const PX_PER_BEAT_MAX = 44;
-const PX_PER_BEAT_MIN = 8;
+// Floor pixel density so trim handles stay reachable when the timeline is very
+// long. Above this, "zoom = 1" means the whole reel fits the rail width;
+// zoom > 1 scales up and the container scrolls horizontally.
+const PX_PER_BEAT_FLOOR = 8;
 const MIN_BEATS = 1;
 const MIN_REEL_SECONDS = 8;
 const MAX_REEL_SECONDS = 30;
 const RAIL_PADDING_X = 16;
+const MIN_ZOOM = 1;
+const MAX_ZOOM = 6;
+const ZOOM_STEP = 1.5;
 
 export const LIBRARY_DRAG_MIME = "application/x-montaj-library-id";
 
@@ -76,6 +81,7 @@ export function TimelineRail({
   const containerRef = useRef<HTMLDivElement>(null);
   const [drop, setDrop] = useState<{ index: number; leftPx: number } | null>(null);
   const [containerWidth, setContainerWidth] = useState(0);
+  const [zoom, setZoom] = useState(1);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -177,17 +183,18 @@ export function TimelineRail({
         ? "over"
         : "ok";
 
-  // Compute px-per-beat so the clip row fits the container without scrolling.
-  // Falls back to the max value when content fits naturally; floors to the min
-  // so trim handles stay reachable.
-  const pxPerBeat = useMemo(() => {
-    if (totalBeats <= 0) return PX_PER_BEAT_MAX;
+  // Pixel density that fits the entire reel into the visible rail. The actual
+  // px-per-beat is this value scaled by `zoom`; when zoom > 1 (or when the fit
+  // value falls below the floor on very long reels) the rail becomes wider
+  // than the container and the outer wrapper scrolls horizontally.
+  const fitPxPerBeat = useMemo(() => {
+    if (totalBeats <= 0) return 44;
     const available = Math.max(0, containerWidth - RAIL_PADDING_X * 2);
-    if (available === 0) return PX_PER_BEAT_MAX;
-    const fit = available / totalBeats;
-    return Math.max(PX_PER_BEAT_MIN, Math.min(PX_PER_BEAT_MAX, fit));
+    if (available === 0) return 44;
+    return Math.max(PX_PER_BEAT_FLOOR, available / totalBeats);
   }, [containerWidth, totalBeats]);
 
+  const pxPerBeat = fitPxPerBeat * zoom;
   const railWidthPx = Math.max(totalBeats, 1) * pxPerBeat;
 
   const playheadPx = useMemo(() => {
@@ -336,11 +343,39 @@ export function TimelineRail({
           >
             Auto-fit
           </button>
+          <div className="flex items-center gap-1 rounded-md border border-[var(--line)] bg-[var(--panel)] px-1 py-0.5">
+            <button
+              aria-label="Zoom out"
+              className="rounded px-1.5 text-[var(--ink-soft)] transition hover:bg-[var(--panel-soft)] disabled:opacity-40"
+              disabled={zoom <= MIN_ZOOM + 0.001}
+              onClick={() => setZoom((z) => Math.max(MIN_ZOOM, z / ZOOM_STEP))}
+              type="button"
+            >
+              −
+            </button>
+            <button
+              className="px-1 font-mono text-[10px] tabular-nums text-[var(--muted)] hover:text-[var(--ink)]"
+              onClick={() => setZoom(1)}
+              title="Fit to width"
+              type="button"
+            >
+              {Math.round(zoom * 100)}%
+            </button>
+            <button
+              aria-label="Zoom in"
+              className="rounded px-1.5 text-[var(--ink-soft)] transition hover:bg-[var(--panel-soft)] disabled:opacity-40"
+              disabled={zoom >= MAX_ZOOM - 0.001}
+              onClick={() => setZoom((z) => Math.min(MAX_ZOOM, z * ZOOM_STEP))}
+              type="button"
+            >
+              +
+            </button>
+          </div>
         </div>
       </div>
 
       <div
-        className="overflow-hidden rounded-[24px] border border-[var(--line)] bg-white/60 p-4"
+        className="overflow-x-auto overflow-y-hidden rounded-[24px] border border-[var(--line)] bg-white/60 p-4"
         onDragLeave={handleDragLeaveRail}
         onDragOver={handleDragOverRail}
         onDrop={handleDropRail}
@@ -352,7 +387,7 @@ export function TimelineRail({
             className="relative cursor-pointer"
             onClick={handleRailClick}
             ref={trackRef}
-            style={{ width: `${railWidthPx}px`, maxWidth: "100%" }}
+            style={{ width: `${railWidthPx}px` }}
           >
             <BeatTickRail
               beatPeriodSeconds={beatPeriodSeconds}

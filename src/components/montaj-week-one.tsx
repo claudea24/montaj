@@ -10,6 +10,7 @@ import {
   MUSIC_LIBRARY,
   type MusicTrack,
   type TimelineMedia,
+  backfillVideoThumbnails,
   extractVideoThumbnails,
   formatBytes,
   getStorageStatus,
@@ -170,6 +171,11 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
           );
           if (cancelled) return;
           setTimeline(resolvedTimeline);
+          backfillVideoThumbnails(resolvedTimeline, (id, frames) => {
+            setTimeline((cur) =>
+              cur.map((it) => (it.id === id ? { ...it, previewFrames: frames } : it)),
+            );
+          });
           const track =
             MUSIC_LIBRARY.find((t) => t.id === doc.selectedTrackId) ??
             MUSIC_LIBRARY[0];
@@ -203,7 +209,13 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
     (async () => {
       try {
         const items = await loadProjectAssets(supabase, projectId);
-        if (!cancelled) setLibrary(items);
+        if (cancelled) return;
+        setLibrary(items);
+        backfillVideoThumbnails(items, (id, frames) => {
+          setLibrary((cur) =>
+            cur.map((it) => (it.id === id ? { ...it, previewFrames: frames } : it)),
+          );
+        });
       } catch (e) {
         if (!cancelled) {
           setStatusMessage(
