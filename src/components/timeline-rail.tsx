@@ -83,26 +83,26 @@ export function TimelineRail({
   );
   const trackRef = useRef<HTMLDivElement>(null);
   const clipsRowRef = useRef<HTMLDivElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerEl, setContainerEl] = useState<HTMLDivElement | null>(null);
   const [drop, setDrop] = useState<{ index: number; leftPx: number } | null>(null);
   const [containerWidth, setContainerWidth] = useState(0);
   const [zoom, setZoom] = useState(1);
 
-  // useLayoutEffect runs synchronously after DOM mutation but BEFORE paint,
-  // so containerWidth is set before the user ever sees the rail. Without
-  // this, the first paint uses width=0 → fitPxPerBeat falls back to a large
-  // value → railWidth blows out → the container scrolls. Re-using
-  // clientWidth (which includes padding, like our subtract assumes) keeps
-  // the resize path consistent with the initial measurement.
+  // Callback ref re-runs whenever the element mounts/unmounts. A plain useRef
+  // + useLayoutEffect([]) was wrong here: the empty-timeline branch below
+  // returns a *different* element with no ref, so on the first mount
+  // containerRef.current was null and the effect bailed. When the rail later
+  // appeared, the effect did not re-run, containerWidth stayed at 0, and
+  // fitPxPerBeat fell to PX_PER_BEAT_FLOOR — the rail capped at ~400px
+  // regardless of the panel width.
   useIsoLayoutEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const measure = () => setContainerWidth(el.clientWidth);
+    if (!containerEl) return;
+    const measure = () => setContainerWidth(containerEl.clientWidth);
     measure();
     const ro = new ResizeObserver(measure);
-    ro.observe(el);
+    ro.observe(containerEl);
     return () => ro.disconnect();
-  }, []);
+  }, [containerEl]);
 
   function computeDrop(clientX: number): { index: number; leftPx: number } {
     const row = clipsRowRef.current;
@@ -406,7 +406,7 @@ export function TimelineRail({
         onDragLeave={handleDragLeaveRail}
         onDragOver={handleDragOverRail}
         onDrop={handleDropRail}
-        ref={containerRef}
+        ref={setContainerEl}
         style={{ paddingLeft: RAIL_PADDING_X, paddingRight: RAIL_PADDING_X }}
       >
         {beatPeriodSeconds ? (
