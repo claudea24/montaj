@@ -134,25 +134,39 @@ export function TimelineRail({
     onLibraryDrop(libraryId, index);
   }
 
-  const { totalSeconds, totalBeats, beatsCommitted } = useMemo(() => {
-    if (!beatPeriodSeconds) {
-      return { totalSeconds: 0, totalBeats: 0, beatsCommitted: false };
-    }
-    const allHaveBeats = timeline.every((it) => it.beats != null);
-    const beats = timeline.reduce((sum, item) => {
-      const b =
-        item.beats ??
-        (item.kind === "video"
-          ? Math.max(1, Math.floor((item.durationSeconds ?? 1) / beatPeriodSeconds))
-          : 2);
-      return sum + b;
-    }, 0);
-    return {
-      totalSeconds: totalDurationFrames > 0 ? totalDurationFrames / fps : 0,
-      totalBeats: beats,
-      beatsCommitted: allHaveBeats,
-    };
-  }, [timeline, beatPeriodSeconds, totalDurationFrames, fps]);
+  const { totalSeconds, totalBeats, targetBeats, effectiveBeats, beatsCommitted } =
+    useMemo(() => {
+      if (!beatPeriodSeconds) {
+        return {
+          totalSeconds: 0,
+          totalBeats: 0,
+          targetBeats: 0,
+          effectiveBeats: 1,
+          beatsCommitted: false,
+        };
+      }
+      const allHaveBeats = timeline.every((it) => it.beats != null);
+      const beats = timeline.reduce((sum, item) => {
+        const b =
+          item.beats ??
+          (item.kind === "video"
+            ? Math.max(1, Math.floor((item.durationSeconds ?? 1) / beatPeriodSeconds))
+            : 2);
+        return sum + b;
+      }, 0);
+      const tBeats = Math.max(1, Math.ceil(targetSeconds / beatPeriodSeconds));
+      return {
+        totalSeconds: totalDurationFrames > 0 ? totalDurationFrames / fps : 0,
+        totalBeats: beats,
+        targetBeats: tBeats,
+        // The ruler always spans at least the project's target duration so
+        // users see the full project length at zoom=1, even before clips fill
+        // it. Clips extending past the target push the ruler wider (and the
+        // outer wrapper scrolls).
+        effectiveBeats: Math.max(beats, tBeats, 1),
+        beatsCommitted: allHaveBeats,
+      };
+    }, [timeline, beatPeriodSeconds, totalDurationFrames, fps, targetSeconds]);
 
   const perSlotPlayerStartFrames = useMemo(() => {
     if (perSlotFrames.length === 0) return [] as number[];
@@ -183,19 +197,20 @@ export function TimelineRail({
         ? "over"
         : "ok";
 
-  // Pixel density that fits the entire reel into the visible rail. The actual
-  // px-per-beat is this value scaled by `zoom`; when zoom > 1 (or when the fit
-  // value falls below the floor on very long reels) the rail becomes wider
-  // than the container and the outer wrapper scrolls horizontally.
+  // Pixel density that fits the entire ruler (target duration, or the clips
+  // if they exceed it) into the visible rail. The actual px-per-beat is this
+  // value scaled by `zoom`; when zoom > 1 (or when the fit value falls below
+  // the floor) the rail becomes wider than the container and the outer
+  // wrapper scrolls horizontally.
   const fitPxPerBeat = useMemo(() => {
-    if (totalBeats <= 0) return 44;
     const available = Math.max(0, containerWidth - RAIL_PADDING_X * 2);
-    if (available === 0) return 44;
-    return Math.max(PX_PER_BEAT_FLOOR, available / totalBeats);
-  }, [containerWidth, totalBeats]);
+    if (available === 0 || effectiveBeats <= 0) return 44;
+    return Math.max(PX_PER_BEAT_FLOOR, available / effectiveBeats);
+  }, [containerWidth, effectiveBeats]);
 
   const pxPerBeat = fitPxPerBeat * zoom;
-  const railWidthPx = Math.max(totalBeats, 1) * pxPerBeat;
+  const railWidthPx = effectiveBeats * pxPerBeat;
+  const targetMarkerPx = targetBeats * pxPerBeat;
 
   const playheadPx = useMemo(() => {
     if (timeline.length === 0 || totalDurationFrames <= 0) return 0;
@@ -218,7 +233,9 @@ export function TimelineRail({
       }
       pxAcc += slotPx[i];
     }
-    return railWidthPx;
+    // Past the last clip: park the playhead at the clip-row end rather than
+    // the ruler end (those differ when target duration exceeds clip sum).
+    return pxAcc;
   }, [
     currentFrame,
     perSlotFrames,
@@ -226,7 +243,6 @@ export function TimelineRail({
     timeline,
     beatPeriodSeconds,
     pxPerBeat,
-    railWidthPx,
     totalDurationFrames,
   ]);
 
@@ -392,8 +408,20 @@ export function TimelineRail({
             <BeatTickRail
               beatPeriodSeconds={beatPeriodSeconds}
               pxPerBeat={pxPerBeat}
-              totalBeats={totalBeats || 1}
+              totalBeats={effectiveBeats}
             />
+
+            {targetBeats > 0 && targetBeats < effectiveBeats ? (
+              <div
+                aria-hidden
+                className="pointer-events-none absolute top-0 bottom-0 z-10 border-l-2 border-dashed border-[var(--accent)]/55"
+                style={{ left: `${targetMarkerPx}px` }}
+              >
+                <span className="absolute -top-1 left-1 rounded bg-[var(--accent)] px-1 py-0.5 font-mono text-[9px] font-medium tracking-wide text-white">
+                  {targetSeconds}s
+                </span>
+              </div>
+            ) : null}
 
             <DndContext
               collisionDetection={closestCenter}

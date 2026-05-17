@@ -132,25 +132,37 @@ function isVideoFile(file: File) {
   return /\.(mov|mp4|m4v|webm)$/i.test(file.name);
 }
 
+type NormalizedVideo = {
+  file: File;
+  /** Authoritative duration returned by the server when it re-encoded the
+   *  file (HEVC / MOV path). Null means the server passed the file through
+   *  unchanged or didn't run; caller should probe duration in the browser. */
+  durationSeconds: number | null;
+};
+
 /** Posts the file to the server transcode route. The server returns 204 when
- *  the input is already a clean MP4 (passthrough), an `x-transcoded: remux`
- *  body when it just rewrote the container, or an `x-transcoded: reencode`
- *  body when it had to fully re-encode (HEVC, VFR, etc.). */
-async function normalizeUploadedVideo(file: File): Promise<File> {
+ *  the input is already a clean MP4 (passthrough), or a re-encoded MP4 body
+ *  with an `x-output-duration` header for HEVC / MOV inputs. */
+async function normalizeUploadedVideo(file: File): Promise<NormalizedVideo> {
   const form = new FormData();
   form.append("video", file);
   let res: Response;
   try {
     res = await fetch("/api/transcode-video", { method: "POST", body: form });
   } catch {
-    return file;
+    return { file, durationSeconds: null };
   }
   if (res.status === 204 || !res.ok) {
-    return file;
+    return { file, durationSeconds: null };
   }
   const buffer = await res.arrayBuffer();
   const baseName = file.name.replace(/\.(mov|m4v|hevc)$/i, "") || "clip";
-  return new File([buffer], `${baseName}.mp4`, { type: "video/mp4" });
+  const transcoded = new File([buffer], `${baseName}.mp4`, { type: "video/mp4" });
+  const headerDur = Number(res.headers.get("x-output-duration") ?? "");
+  return {
+    file: transcoded,
+    durationSeconds: Number.isFinite(headerDur) && headerDur > 0 ? headerDur : null,
+  };
 }
 
 async function probeVideoDuration(blobUrl: string): Promise<number> {
@@ -296,9 +308,13 @@ async function prepareFile(file: File): Promise<PreparedMedia> {
   }
 
   if (isVideoFile(file)) {
-    const playable = await normalizeUploadedVideo(file);
+    const { file: playable, durationSeconds: serverDuration } =
+      await normalizeUploadedVideo(file);
     const src = URL.createObjectURL(playable);
-    const durationSeconds = await probeVideoDuration(src);
+    // Prefer the server-reported duration (ffprobe) over a browser-side probe.
+    // The browser can return NaN/Infinity briefly while the file is still
+    // streaming, which causes wrong slot lengths and the "video loops" bug.
+    const durationSeconds = serverDuration ?? (await probeVideoDuration(src));
     return {
       uploadFile: playable,
       timeline: {
