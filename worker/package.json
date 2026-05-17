@@ -1,0 +1,22 @@
+{
+  "name": "montaj-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Railway worker that polls Supabase for pending transcode jobs and runs ffmpeg.",
+  "scripts": {
+    "start": "tsx worker.ts",
+    "dev": "tsx watch worker.ts"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.8",
+    "tsx": "^4.19.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
