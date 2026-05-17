@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Montaj — Active tasks</title>
+  <style>
+    :root {
+      --bg: #f7f7f5;
+      --ink: #1f1d1a;
+      --ink-soft: #4b4944;
+      --muted: #8a8782;
+      --panel: #ffffff;
+      --line: #e6e4df;
+      --accent: #18b78b;
+      --accent-soft: #e6f7f1;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--ink);
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    main {
+      max-width: 720px;
+      margin: 64px auto;
+      padding: 0 28px;
+    }
+    header { margin-bottom: 40px; }
+    h1 {
+      font-size: 26px;
+      letter-spacing: -0.01em;
+      margin: 0 0 4px;
+    }
+    .sub {
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .task {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 22px 24px;
+      margin-bottom: 16px;
+      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.02);
+    }
+    .task-head {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 4px;
+    }
+    .badge {
+      background: var(--accent);
+      color: white;
+      font-weight: 600;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      padding: 3px 8px;
+      border-radius: 999px;
+    }
+    .task-title {
+      font-size: 17px;
+      font-weight: 600;
+      margin: 0;
+      flex: 1;
+    }
+    .status {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      padding: 3px 8px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+    }
+    .status.in-progress {
+      color: #b87918;
+      border-color: #ecd9b8;
+      background: #fbf3e3;
+    }
+    .body {
+      color: var(--ink-soft);
+      font-size: 14.5px;
+      margin-top: 10px;
+    }
+    .body p { margin: 0 0 10px; }
+    ul {
+      margin: 6px 0 0;
+      padding-left: 20px;
+    }
+    li {
+      margin-bottom: 4px;
+      color: var(--ink-soft);
+    }
+    code {
+      font-family: ui-monospace, "SF Mono", Menlo, monospace;
+      font-size: 12.5px;
+      background: #efece6;
+      padding: 1px 5px;
+      border-radius: 4px;
+      color: var(--ink);
+    }
+    footer {
+      margin-top: 32px;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+    }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Active tasks</h1>
+      <div class="sub">Montaj · updated 2026-05-17</div>
+    </header>
+
+    <section class="task">
+      <div class="task-head">
+        <span class="badge">1</span>
+        <h2 class="task-title">Text &amp; emoji overlay feature</h2>
+        <span class="status in-progress">In progress</span>
+      </div>
+      <div class="body">
+        <p>Drop text layers and emoji stickers onto the timeline; they ride alongside the video and survive autosave.</p>
+        <ul>
+          <li>Overlay model in <code>src/lib/overlays.ts</code> (<code>createTextOverlay</code>, <code>createEmojiOverlay</code>, <code>EMOJI_PALETTE</code>)</li>
+          <li>Editor state wired in <code>src/components/montaj-week-one.tsx</code>; persists through <code>projects.document.overlays</code></li>
+          <li>Rendered in <code>src/components/slideshow-composition.tsx</code> over the active slot</li>
+          <li>Remaining: drag/resize/rotate handles, per-overlay timing windows, font/style controls in the right panel</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="task">
+      <div class="task-head">
+        <span class="badge">2</span>
+        <h2 class="task-title">iPhone MOV upload — freezes &amp; repeats</h2>
+        <span class="status in-progress">In progress · still flaky</span>
+      </div>
+      <div class="body">
+        <p>Some uploads still freeze on certain frames or replay sections during preview, even after the transcoded MP4 is served.</p>
+        <p>Transcode currently runs on Vercel via bundled <code>@ffmpeg-installer/ffmpeg</code>. Args in <code>src/app/api/transcode-video/route.ts</code>: <code>fps=30</code> filter, <code>-bf 0</code>, explicit stream mapping, <code>-async 1</code>, <code>+faststart</code>. Output verified clean against test clip (CFR 30 fps, monotonic PTS, 1 keyframe/sec, AAC in sync).</p>
+        <p>Suspected remaining causes:</p>
+        <ul>
+          <li>Cold-start latency makes the first byte slow → browser preview starts on a partial response</li>
+          <li>Dolby Vision / HDR sources where the downcast survives but with subtly off PTS</li>
+          <li>Remotion <code>&lt;Video&gt;</code> drift when transitions overlap two clips that are both still buffering</li>
+          <li>Cached library tiles for clips uploaded before the transcode pipeline tightened — re-upload to confirm</li>
+        </ul>
+      </div>
+    </section>
+
+    <footer>
+      Live: <a href="https://montaj-claudea24.vercel.app">montaj-claudea24.vercel.app</a>
+    </footer>
+  </main>
+</body>
+</html>
