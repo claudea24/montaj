@@ -1,13 +1,15 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { TimelineMedia } from "@/lib/media";
+import type { Overlay } from "@/lib/overlays";
 
 export type ProjectDocument = {
   timeline: TimelineMedia[];
   selectedTrackId: string;
   targetSeconds: number;
+  overlays?: Overlay[];
 };
 
-export type ProjectRow = {
+type ProjectRow = {
   id: string;
   user_id: string;
   name: string;

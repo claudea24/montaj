@@ -32,6 +32,15 @@ import {
 import { detectBeats, type BeatGrid } from "@/lib/beats";
 import { imageSrcToDataUrl } from "@/lib/photo-thumb";
 import type { AnalysisResult } from "@/lib/ai";
+import {
+  createEmojiOverlay,
+  createTextOverlay,
+  EMOJI_PALETTE,
+  OVERLAY_ANIMATIONS,
+  type Overlay,
+  type OverlayAnimation,
+} from "@/lib/overlays";
+import { OVERLAY_FONTS, type OverlayFontId } from "@/lib/fonts";
 
 const FPS = 30;
 const FALLBACK_SECONDS_PER_IMAGE = 1;
@@ -98,6 +107,8 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
     [projectId, router],
   );
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [overlays, setOverlays] = useState<Overlay[]>([]);
+  const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(null);
   const [projectLoaded, setProjectLoaded] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">(
     "idle",
@@ -105,6 +116,11 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
   const [lastSavedAt, setLastSavedAt] = useState<number | null>(null);
   const dirtyRef = useRef(false);
   const savingRef = useRef(false);
+  // Serialized snapshot of the last state we know matches the DB (set on load
+  // and after each successful autosave). The autosave loop compares against
+  // this before writing, so even a falsely-flipped dirtyRef can never clobber
+  // the saved doc with a stale/empty in-memory state.
+  const lastSavedSnapshotRef = useRef<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string>(
     getStorageStatus(supabase).configured
       ? "Supabase storage is configured. Uploaded images will also be persisted."
@@ -129,21 +145,66 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [currentFrame, setCurrentFrame] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  // Tracks which projectId has already had its document loaded + signed URLs
+  // resolved. Without this guard, an upstream `supabase` ref change (e.g.
+  // Clerk session refresh) would re-fire the load effect mid-playback and
+  // remint signed URLs, which remounts <Video> and stalls at readyState=0.
+  const loadedProjectRef = useRef<string | null>(null);
 
   useEffect(() => {
     const player = playerRef.current;
     if (!player) return;
+    // Throttle frame state updates to ~10 Hz. Remotion's frameupdate fires per
+    // browser frame (~60 Hz); calling setState that often re-renders the entire
+    // editor (including TimelineRail's tick row + playhead) and starves the
+    // Player's own RAF loop, causing playback to drift well under 1x wall time.
+    // Precise frame is still available via playerRef.current.getCurrentFrame().
+    let lastSetAt = 0;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
+    let pendingFrame = 0;
+    const FRAME_UPDATE_MS = 100;
+    const flush = () => {
+      pendingTimer = null;
+      lastSetAt = performance.now();
+      setCurrentFrame(pendingFrame);
+    };
     const onFrame = (event: { detail: { frame: number } }) => {
-      setCurrentFrame(event.detail.frame);
+      pendingFrame = event.detail.frame;
+      const since = performance.now() - lastSetAt;
+      if (since >= FRAME_UPDATE_MS) {
+        if (pendingTimer != null) {
+          clearTimeout(pendingTimer);
+          pendingTimer = null;
+        }
+        flush();
+      } else if (pendingTimer == null) {
+        pendingTimer = setTimeout(flush, FRAME_UPDATE_MS - since);
+      }
     };
     const onPlay = () => setIsPlaying(true);
-    const onPause = () => setIsPlaying(false);
-    const onEnded = () => setIsPlaying(false);
+    const onPause = () => {
+      setIsPlaying(false);
+      // Flush the precise pause frame so the counter and playhead settle.
+      if (pendingTimer != null) {
+        clearTimeout(pendingTimer);
+        pendingTimer = null;
+      }
+      setCurrentFrame(player.getCurrentFrame());
+    };
+    const onEnded = () => {
+      setIsPlaying(false);
+      if (pendingTimer != null) {
+        clearTimeout(pendingTimer);
+        pendingTimer = null;
+      }
+      setCurrentFrame(player.getCurrentFrame());
+    };
     player.addEventListener("frameupdate", onFrame);
     player.addEventListener("play", onPlay);
     player.addEventListener("pause", onPause);
     player.addEventListener("ended", onEnded);
     return () => {
+      if (pendingTimer != null) clearTimeout(pendingTimer);
       player.removeEventListener("frameupdate", onFrame);
       player.removeEventListener("play", onPlay);
       player.removeEventListener("pause", onPause);
@@ -158,11 +219,18 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
   // Load project document once Supabase client + projectId are ready.
   useEffect(() => {
     if (!supabase || !projectId) return;
+    if (loadedProjectRef.current === projectId) return;
     let cancelled = false;
     (async () => {
       try {
         const project = await getProject(supabase, projectId);
         if (cancelled) return;
+        let loadedDoc: ProjectDocument = {
+          timeline: [],
+          selectedTrackId: MUSIC_LIBRARY[0].id,
+          targetSeconds: DEFAULT_TARGET_SECONDS,
+          overlays: [],
+        };
         if (project?.document) {
           const doc = project.document;
           const resolvedTimeline = await resolveTimelineMediaUrls(
@@ -181,7 +249,22 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
             MUSIC_LIBRARY[0];
           setSelectedTrack(track);
           setTargetSeconds(doc.targetSeconds ?? DEFAULT_TARGET_SECONDS);
+          setOverlays(doc.overlays ?? []);
+          loadedDoc = {
+            timeline: resolvedTimeline,
+            selectedTrackId: track.id,
+            targetSeconds: doc.targetSeconds ?? DEFAULT_TARGET_SECONDS,
+            overlays: doc.overlays ?? [],
+          };
         }
+        // Mark loaded for both branches (project with document, and a fresh
+        // project that has no document yet) so the effect doesn't re-fire.
+        loadedProjectRef.current = projectId;
+        // Snapshot the in-memory state we just loaded (post resolve/truncation)
+        // as the autosave baseline. If a future autosave tick would write a doc
+        // identical to this snapshot, it skips the write — so a truncated load
+        // can't clobber the canonical doc on disk with [] or fewer items.
+        lastSavedSnapshotRef.current = JSON.stringify(loadedDoc);
         setProjectLoaded(true);
         dirtyRef.current = false;
       } catch (e) {
@@ -233,23 +316,34 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
   useEffect(() => {
     if (!projectLoaded) return;
     dirtyRef.current = true;
-  }, [timeline, selectedTrack, targetSeconds, projectLoaded]);
+  }, [timeline, selectedTrack, targetSeconds, overlays, projectLoaded]);
 
   // 15s autosave loop. Skips when nothing has changed.
   useEffect(() => {
     if (!supabase || !projectId || !projectLoaded) return;
     const id = setInterval(async () => {
       if (!dirtyRef.current || savingRef.current) return;
+      const doc: ProjectDocument = {
+        timeline,
+        selectedTrackId: selectedTrack.id,
+        targetSeconds,
+        overlays,
+      };
+      const snapshot = JSON.stringify(doc);
+      // Compare against the last known-on-disk snapshot. If the in-memory
+      // state matches what's already saved, skip the write. This stops the
+      // "load arrives with truncated timeline → autosave persists the empty
+      // result → original doc gone" failure mode.
+      if (snapshot === lastSavedSnapshotRef.current) {
+        dirtyRef.current = false;
+        return;
+      }
       savingRef.current = true;
       dirtyRef.current = false;
       setSaveState("saving");
       try {
-        const doc: ProjectDocument = {
-          timeline,
-          selectedTrackId: selectedTrack.id,
-          targetSeconds,
-        };
         await updateProjectDocument(supabase, projectId, doc);
+        lastSavedSnapshotRef.current = snapshot;
         setSaveState("saved");
         setLastSavedAt(Date.now());
       } catch (e) {
@@ -263,7 +357,7 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
       }
     }, AUTOSAVE_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [supabase, projectId, projectLoaded, timeline, selectedTrack, targetSeconds]);
+  }, [supabase, projectId, projectLoaded, timeline, selectedTrack, targetSeconds, overlays]);
 
   const togglePlay = useCallback(() => {
     const p = playerRef.current;
@@ -357,6 +451,33 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
     () => timeline.map((item) => item.caption ?? ""),
     [timeline],
   );
+  // Memoize the entire Player inputProps so its identity is stable across
+  // unrelated parent re-renders (e.g. frameupdate). A fresh inputProps object
+  // on each render propagates into Remotion's playback useEffect deps and
+  // resets its `startedTime` accumulator, which causes the player to drift
+  // below 1x wall time (the more re-renders/sec, the slower the player).
+  const playerInputProps = useMemo(() => ({
+    images:
+      timeline.length > 0
+        ? timeline
+        : [
+            {
+              id: "placeholder",
+              name: "Placeholder",
+              size: 0,
+              src: "/placeholder/postcard.svg",
+              kind: "image" as const,
+            },
+          ],
+    soundtrackSrc: selectedTrack.src,
+    soundtrackLoopFrames: Math.round(MUSIC_LENGTH_SECONDS * FPS),
+    perSlotFrames: timeline.length > 0 ? perSlotFrames : undefined,
+    perSlotStartFrames: timeline.length > 0 ? perSlotStartFrames : undefined,
+    fallbackSecondsPerImage: FALLBACK_SECONDS_PER_IMAGE,
+    captions: timeline.length > 0 ? captions : undefined,
+    transitionFrames: TRANSITION_FRAMES,
+    overlays,
+  }), [timeline, selectedTrack.src, perSlotFrames, perSlotStartFrames, captions, overlays]);
   function removeItem(id: string) {
     setTimeline((current) => {
       const removed = current.find((it) => it.id === id);
@@ -468,6 +589,64 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
     });
   }
 
+  const reelSeconds = totalFrames > 0 ? totalFrames / FPS : 0;
+
+  function clampOverlayTiming(
+    startSeconds: number,
+    durationSeconds: number,
+  ): { startSeconds: number; durationSeconds: number } {
+    // Overlays can extend slightly past the reel end (so users can add one to
+    // a not-yet-trimmed timeline) but never go negative. We clamp duration to
+    // >= 0.1s to keep the bar pickable.
+    const safeStart = Math.max(0, startSeconds);
+    const safeDur = Math.max(0.1, durationSeconds);
+    return { startSeconds: safeStart, durationSeconds: safeDur };
+  }
+
+  function addTextOverlay() {
+    const start = currentFrame / FPS;
+    const overlay = createTextOverlay("Your text here", start);
+    setOverlays((cur) => [...cur, overlay]);
+    setSelectedOverlayId(overlay.id);
+    setSelectedClipId(null);
+  }
+
+  function addEmojiOverlay(emoji: string) {
+    const start = currentFrame / FPS;
+    const overlay = createEmojiOverlay(emoji, start);
+    setOverlays((cur) => [...cur, overlay]);
+    setSelectedOverlayId(overlay.id);
+    setSelectedClipId(null);
+  }
+
+  function updateOverlay(id: string, patch: Partial<Overlay>) {
+    setOverlays((cur) =>
+      cur.map((o) => {
+        if (o.id !== id) return o;
+        const next = { ...o, ...patch };
+        if (patch.startSeconds != null || patch.durationSeconds != null) {
+          const clamped = clampOverlayTiming(
+            next.startSeconds,
+            next.durationSeconds,
+          );
+          next.startSeconds = clamped.startSeconds;
+          next.durationSeconds = clamped.durationSeconds;
+        }
+        return next;
+      }),
+    );
+  }
+
+  function removeOverlay(id: string) {
+    setOverlays((cur) => cur.filter((o) => o.id !== id));
+    if (selectedOverlayId === id) setSelectedOverlayId(null);
+  }
+
+  const selectedOverlay = useMemo(
+    () => overlays.find((o) => o.id === selectedOverlayId) ?? null,
+    [overlays, selectedOverlayId],
+  );
+
   async function runAIAnalysis() {
     const photos = timeline.filter((it) => it.kind === "image");
     if (photos.length === 0) {
@@ -533,17 +712,19 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
   const selectedClip =
     selectedClipId == null ? null : timeline.find((it) => it.id === selectedClipId) ?? null;
 
-  // Clicking anywhere outside the right panel dismisses it. Clip clicks
-  // already stopPropagation in the rail, so picking another clip still works.
+  // Clicking anywhere outside the right panel dismisses it. Clip/overlay
+  // clicks already stopPropagation in the rail, so picking another item still
+  // works.
   const handleMainClick = useCallback(
     (e: React.MouseEvent<HTMLElement>) => {
-      if (selectedClipId == null) return;
+      if (selectedClipId == null && selectedOverlayId == null) return;
       const target = e.target as HTMLElement | null;
       if (!target) return;
       if (target.closest("[data-right-panel]")) return;
       setSelectedClipId(null);
+      setSelectedOverlayId(null);
     },
-    [selectedClipId],
+    [selectedClipId, selectedOverlayId],
   );
 
   return (
@@ -592,6 +773,8 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
           isDragging={isDragging}
           isUploading={isUploading}
           library={library}
+          onAddEmoji={addEmojiOverlay}
+          onAddText={addTextOverlay}
           onFiles={handleFiles}
           onRemoveLibrary={removeLibraryItem}
           onRunAi={runAIAnalysis}
@@ -607,7 +790,7 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
       <section className="flex min-h-0 flex-1 flex-col gap-3 bg-[var(--bg-soft)] px-3 py-3">
         <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-3">
           <div
-            className="overflow-hidden rounded-xl bg-[var(--panel-strong)]"
+            className="relative overflow-hidden rounded-xl bg-[var(--panel-strong)]"
             style={{ height: "100%", aspectRatio: "9 / 16" }}
           >
             <Player
@@ -618,30 +801,20 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
               compositionHeight={1920}
               durationInFrames={durationInFrames}
               fps={FPS}
-              inputProps={{
-                images:
-                  timeline.length > 0
-                    ? timeline
-                    : [
-                        {
-                          id: "placeholder",
-                          name: "Placeholder",
-                          size: 0,
-                          src: "/placeholder/postcard.svg",
-                          kind: "image" as const,
-                        },
-                      ],
-                soundtrackSrc: selectedTrack.src,
-                soundtrackLoopFrames: Math.round(MUSIC_LENGTH_SECONDS * FPS),
-                perSlotFrames: timeline.length > 0 ? perSlotFrames : undefined,
-                perSlotStartFrames:
-                  timeline.length > 0 ? perSlotStartFrames : undefined,
-                fallbackSecondsPerImage: FALLBACK_SECONDS_PER_IMAGE,
-                captions: timeline.length > 0 ? captions : undefined,
-                transitionFrames: TRANSITION_FRAMES,
-              }}
+              inputProps={playerInputProps}
               ref={playerRef}
               style={{ width: "100%", height: "100%" }}
+            />
+            <OverlayDragLayer
+              currentFrame={currentFrame}
+              fps={FPS}
+              onChange={updateOverlay}
+              onSelect={(id) => {
+                setSelectedOverlayId(id);
+                if (id != null) setSelectedClipId(null);
+              }}
+              overlays={overlays}
+              selectedOverlayId={selectedOverlayId}
             />
           </div>
         </div>
@@ -662,17 +835,29 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
             onAutoFit={autoFit}
             onCaptionChange={setCaption}
             onLibraryDrop={insertLibraryItem}
+            onOverlayTimingChange={(id, startSeconds, durationSeconds) =>
+              updateOverlay(id, { startSeconds, durationSeconds })
+            }
             onRemove={(id) => {
               if (id === selectedClipId) setSelectedClipId(null);
               removeItem(id);
             }}
             onReorder={setTimeline}
             onSeek={seekTo}
-            onSelectClip={setSelectedClipId}
+            onSelectClip={(id) => {
+              setSelectedClipId(id);
+              if (id != null) setSelectedOverlayId(null);
+            }}
+            onSelectOverlay={(id) => {
+              setSelectedOverlayId(id);
+              if (id != null) setSelectedClipId(null);
+            }}
             onSetTrim={setTrim}
             onTargetSecondsChange={setTargetSeconds}
+            overlays={overlays}
             perSlotFrames={perSlotFrames}
             selectedClipId={selectedClipId}
+            selectedOverlayId={selectedOverlayId}
             targetSeconds={targetSeconds}
             timeline={timeline}
             totalDurationFrames={totalFrames}
@@ -681,16 +866,25 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
         </section>
       </section>
 
-      <RightPanel
-        beatPeriodSeconds={beatPeriodSeconds}
-        clip={selectedClip}
-        onCaptionChange={setCaption}
-        onClose={() => setSelectedClipId(null)}
-        onRemove={(id) => {
-          setSelectedClipId(null);
-          removeItem(id);
-        }}
-      />
+      {selectedOverlay ? (
+        <OverlayRightPanel
+          onChange={(patch) => updateOverlay(selectedOverlay.id, patch)}
+          onClose={() => setSelectedOverlayId(null)}
+          onRemove={() => removeOverlay(selectedOverlay.id)}
+          overlay={selectedOverlay}
+        />
+      ) : (
+        <RightPanel
+          beatPeriodSeconds={beatPeriodSeconds}
+          clip={selectedClip}
+          onCaptionChange={setCaption}
+          onClose={() => setSelectedClipId(null)}
+          onRemove={(id) => {
+            setSelectedClipId(null);
+            removeItem(id);
+          }}
+        />
+      )}
     </main>
   );
 }
@@ -744,6 +938,200 @@ function formatTimecode(seconds: number): string {
   const ss = Math.floor(safe % 60);
   const cs = Math.floor((safe - Math.floor(safe)) * 100);
   return `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}:${String(cs).padStart(2, "0")}`;
+}
+
+type OverlayDragLayerProps = {
+  overlays: Overlay[];
+  selectedOverlayId: string | null;
+  currentFrame: number;
+  fps: number;
+  onSelect: (id: string | null) => void;
+  onChange: (id: string, patch: Partial<Overlay>) => void;
+};
+
+function OverlayDragLayer({
+  overlays,
+  selectedOverlayId,
+  currentFrame,
+  fps,
+  onSelect,
+  onChange,
+}: OverlayDragLayerProps) {
+  const layerRef = useRef<HTMLDivElement>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const dragRef = useRef<{
+    id: string;
+    pointerStartX: number;
+    pointerStartY: number;
+    initialX: number;
+    initialY: number;
+    rectW: number;
+    rectH: number;
+  } | null>(null);
+
+  const seconds = currentFrame / fps;
+  const visible = overlays.filter(
+    (o) => seconds >= o.startSeconds && seconds < o.startSeconds + o.durationSeconds,
+  );
+
+  // Derive the effective editing target. If the overlay being edited is no
+  // longer visible at this frame (e.g., user scrubbed past its window) the
+  // editor disappears automatically — no setState during render needed.
+  const effectiveEditingId =
+    editingId && visible.some((o) => o.id === editingId) ? editingId : null;
+
+  if (visible.length === 0) return null;
+
+  const beginDrag = (
+    overlay: Overlay,
+    e: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    e.stopPropagation();
+    const rect = layerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    (e.target as Element).setPointerCapture(e.pointerId);
+    dragRef.current = {
+      id: overlay.id,
+      pointerStartX: e.clientX,
+      pointerStartY: e.clientY,
+      initialX: overlay.x,
+      initialY: overlay.y,
+      rectW: rect.width,
+      rectH: rect.height,
+    };
+    onSelect(overlay.id);
+  };
+
+  const handleMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const dx = (e.clientX - drag.pointerStartX) / drag.rectW;
+    const dy = (e.clientY - drag.pointerStartY) / drag.rectH;
+    const nextX = Math.max(0, Math.min(1, drag.initialX + dx));
+    const nextY = Math.max(0, Math.min(1, drag.initialY + dy));
+    onChange(drag.id, { x: nextX, y: nextY });
+  };
+
+  const endDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return;
+    (e.target as Element).releasePointerCapture?.(e.pointerId);
+    dragRef.current = null;
+  };
+
+  return (
+    <div
+      className="pointer-events-none absolute inset-0 z-10"
+      data-overlay-drag-layer
+      ref={layerRef}
+      style={{ containerType: "size" }}
+    >
+      {visible.map((overlay) => {
+        const isSelected = selectedOverlayId === overlay.id;
+        const isEditing =
+          overlay.kind === "text" && effectiveEditingId === overlay.id;
+        if (isEditing) {
+          return (
+            <InlineTextEditor
+              key={overlay.id}
+              onChange={(value) => onChange(overlay.id, { content: value })}
+              onExit={() => setEditingId(null)}
+              overlay={overlay}
+            />
+          );
+        }
+        return (
+          <div
+            className={`pointer-events-auto absolute h-14 w-14 -translate-x-1/2 -translate-y-1/2 cursor-move rounded-md border-2 transition ${
+              isSelected
+                ? "border-[var(--accent)] bg-[var(--accent)]/15"
+                : "border-white/70 bg-white/10 hover:border-white"
+            }`}
+            data-overlay-handle
+            data-overlay-id={overlay.id}
+            key={overlay.id}
+            onDoubleClick={(e) => {
+              if (overlay.kind !== "text") return;
+              e.stopPropagation();
+              onSelect(overlay.id);
+              setEditingId(overlay.id);
+            }}
+            onPointerDown={(e) => beginDrag(overlay, e)}
+            onPointerMove={handleMove}
+            onPointerUp={endDrag}
+            style={{
+              left: `${overlay.x * 100}%`,
+              top: `${overlay.y * 100}%`,
+            }}
+            title={
+              overlay.kind === "text"
+                ? "Drag to reposition · double-click to edit"
+                : "Drag to reposition"
+            }
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+function InlineTextEditor({
+  overlay,
+  onChange,
+  onExit,
+}: {
+  overlay: Overlay;
+  onChange: (value: string) => void;
+  onExit: () => void;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => {
+    ref.current?.focus();
+    ref.current?.select();
+  }, []);
+
+  // `cqw` = 1% of the parent container's width. Composition is 1080px wide,
+  // so an overlay fontSize of N px corresponds to (N / 1080 * 100) cqw in
+  // the drag layer (which always matches the player aspect-ratio).
+  const fontSizeCqw = (overlay.fontSize / 1080) * 100;
+  return (
+    <textarea
+      className="pointer-events-auto absolute -translate-x-1/2 -translate-y-1/2 resize-none border-2 border-[var(--accent)] bg-transparent text-center outline-none"
+      data-overlay-editor
+      data-overlay-id={overlay.id}
+      onBlur={onExit}
+      onChange={(e) => onChange(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          onExit();
+        }
+        // Stop space/arrow from reaching the Player (which would play/seek).
+        e.stopPropagation();
+      }}
+      ref={ref}
+      rows={2}
+      style={{
+        left: `${overlay.x * 100}%`,
+        top: `${overlay.y * 100}%`,
+        fontFamily: fontFamilyForOverlay(overlay),
+        fontWeight: 700,
+        color: overlay.color ?? "#ffffff",
+        fontSize: `${fontSizeCqw}cqw`,
+        lineHeight: 1.1,
+        textShadow: "0 4px 32px rgba(0,0,0,0.55)",
+        width: "70%",
+        caretColor: "var(--accent)",
+        whiteSpace: "pre-wrap",
+      }}
+      value={overlay.content}
+    />
+  );
+}
+
+function fontFamilyForOverlay(overlay: Overlay): string {
+  const id = overlay.fontFamily ?? "inter";
+  return OVERLAY_FONTS.find((f) => f.id === id)?.cssFamily ?? OVERLAY_FONTS[0].cssFamily;
 }
 
 type LibraryCardProps = {
@@ -1130,6 +1518,8 @@ type MediaPanelProps = {
   isDragging: boolean;
   isUploading: boolean;
   library: TimelineMedia[];
+  onAddText: () => void;
+  onAddEmoji: (emoji: string) => void;
   onFiles: (files: FileList | null) => void | Promise<void>;
   onRemoveLibrary: (id: string) => void;
   onRunAi: () => void | Promise<void>;
@@ -1151,6 +1541,8 @@ function MediaPanel(props: MediaPanelProps) {
     isDragging,
     isUploading,
     library,
+    onAddText,
+    onAddEmoji,
     onFiles,
     onRemoveLibrary,
     onRunAi,
@@ -1286,13 +1678,64 @@ function MediaPanel(props: MediaPanelProps) {
           </div>
         ) : null}
 
-        {section !== "media" && section !== "audio" && section !== "captions" ? (
+        {section === "text" ? (
+          <TextPanelContent onAddEmoji={onAddEmoji} onAddText={onAddText} />
+        ) : null}
+
+        {section !== "media" &&
+        section !== "audio" &&
+        section !== "captions" &&
+        section !== "text" ? (
           <div className="rounded-lg border border-dashed border-[var(--line-strong)] bg-[var(--panel-soft)] p-6 text-center text-xs leading-5 text-[var(--muted)]">
             {section.charAt(0).toUpperCase() + section.slice(1)} coming soon.
           </div>
         ) : null}
       </div>
     </aside>
+  );
+}
+
+function TextPanelContent({
+  onAddText,
+  onAddEmoji,
+}: {
+  onAddText: () => void;
+  onAddEmoji: (emoji: string) => void;
+}) {
+  return (
+    <div className="grid gap-3">
+      <button
+        className="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white transition hover:bg-[var(--accent-strong)]"
+        onClick={onAddText}
+        type="button"
+      >
+        + Add text
+      </button>
+      <p className="text-[11px] leading-4 text-[var(--muted)]">
+        Text is added at the playhead for 2s. Drag the bar on the timeline to
+        change start and duration, or edit the selected overlay in the right
+        panel.
+      </p>
+
+      <div className="mt-1 grid gap-2">
+        <div className="text-[10px] uppercase tracking-wider text-[var(--muted)]">
+          Emoji
+        </div>
+        <div className="grid grid-cols-4 gap-1.5" data-emoji-palette>
+          {EMOJI_PALETTE.map((emoji) => (
+            <button
+              aria-label={`Add ${emoji} overlay`}
+              className="flex h-12 items-center justify-center rounded-md border border-[var(--line)] bg-[var(--panel-soft)] text-2xl transition hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]"
+              key={emoji}
+              onClick={() => onAddEmoji(emoji)}
+              type="button"
+            >
+              {emoji}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1384,5 +1827,203 @@ function PlaceholderRow({ label }: { label: string }) {
       <span className="font-medium">{label}</span>
       <span className="text-[10px] text-[var(--muted)]">soon</span>
     </div>
+  );
+}
+
+type OverlayRightPanelProps = {
+  overlay: Overlay;
+  onChange: (patch: Partial<Overlay>) => void;
+  onRemove: () => void;
+  onClose: () => void;
+};
+
+function OverlayRightPanel({
+  overlay,
+  onChange,
+  onRemove,
+  onClose,
+}: OverlayRightPanelProps) {
+  const isText = overlay.kind === "text";
+  const endSeconds = overlay.startSeconds + overlay.durationSeconds;
+  return (
+    <aside
+      data-right-panel
+      className="flex w-[300px] shrink-0 flex-col border-l border-[var(--line)] bg-[var(--panel)]"
+    >
+      <div className="flex shrink-0 items-center justify-between border-b border-[var(--line)] px-4 py-3">
+        <h2 className="truncate text-sm font-medium text-[var(--ink-soft)]">
+          {isText ? "Text overlay" : "Emoji overlay"}
+        </h2>
+        <button
+          aria-label="Close panel"
+          className="rounded-md p-1 text-[var(--muted)] hover:bg-[var(--panel-soft)] hover:text-[var(--ink)]"
+          onClick={onClose}
+          type="button"
+        >
+          ✕
+        </button>
+      </div>
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4 text-xs">
+        <div className="grid gap-1">
+          <div className="text-[10px] uppercase tracking-wider text-[var(--muted)]">Type</div>
+          <div className="font-medium">{overlay.kind}</div>
+        </div>
+
+        <div className="grid gap-1">
+          <div className="text-[10px] uppercase tracking-wider text-[var(--muted)]">
+            Active window
+          </div>
+          <div className="font-medium">
+            {overlay.startSeconds.toFixed(1)}s → {endSeconds.toFixed(1)}s
+            <span className="ml-1 text-[var(--muted)]">
+              ({overlay.durationSeconds.toFixed(1)}s)
+            </span>
+          </div>
+        </div>
+
+        <label className="grid gap-1">
+          <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">
+            {isText ? "Text" : "Emoji"}
+          </span>
+          {isText ? (
+            <textarea
+              className="min-h-[64px] rounded-md border border-[var(--line)] bg-[var(--panel-soft)] px-2 py-1.5 text-xs focus:border-[var(--accent)] focus:outline-none"
+              onChange={(e) => onChange({ content: e.target.value })}
+              placeholder="Your text here"
+              value={overlay.content}
+            />
+          ) : (
+            <input
+              className="rounded-md border border-[var(--line)] bg-[var(--panel-soft)] px-2 py-1.5 text-center text-xl focus:border-[var(--accent)] focus:outline-none"
+              onChange={(e) => onChange({ content: e.target.value })}
+              maxLength={4}
+              type="text"
+              value={overlay.content}
+            />
+          )}
+        </label>
+
+        <label className="grid gap-1">
+          <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">
+            Start (s)
+          </span>
+          <input
+            className="rounded-md border border-[var(--line)] bg-[var(--panel-soft)] px-2 py-1.5 text-xs focus:border-[var(--accent)] focus:outline-none"
+            min={0}
+            onChange={(e) => onChange({ startSeconds: Number(e.target.value) })}
+            step={0.1}
+            type="number"
+            value={overlay.startSeconds.toFixed(2)}
+          />
+        </label>
+
+        <label className="grid gap-1">
+          <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">
+            Duration (s)
+          </span>
+          <input
+            className="rounded-md border border-[var(--line)] bg-[var(--panel-soft)] px-2 py-1.5 text-xs focus:border-[var(--accent)] focus:outline-none"
+            min={0.1}
+            onChange={(e) =>
+              onChange({ durationSeconds: Number(e.target.value) })
+            }
+            step={0.1}
+            type="number"
+            value={overlay.durationSeconds.toFixed(2)}
+          />
+        </label>
+
+        <label className="grid gap-1">
+          <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">
+            Size
+          </span>
+          <input
+            className="w-full"
+            max={isText ? 240 : 360}
+            min={24}
+            onChange={(e) => onChange({ fontSize: Number(e.target.value) })}
+            step={4}
+            type="range"
+            value={overlay.fontSize}
+          />
+          <span className="text-[10px] text-[var(--muted)]">{overlay.fontSize}px</span>
+        </label>
+
+        {isText ? (
+          <label className="grid gap-1">
+            <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">
+              Color
+            </span>
+            <input
+              className="h-8 w-full cursor-pointer rounded-md border border-[var(--line)] bg-[var(--panel-soft)]"
+              onChange={(e) => onChange({ color: e.target.value })}
+              type="color"
+              value={overlay.color ?? "#ffffff"}
+            />
+          </label>
+        ) : null}
+
+        {isText ? (
+          <div className="grid gap-1">
+            <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">
+              Font
+            </span>
+            <div className="grid grid-cols-2 gap-1.5">
+              {OVERLAY_FONTS.map((f) => {
+                const active = (overlay.fontFamily ?? "inter") === f.id;
+                return (
+                  <button
+                    aria-pressed={active}
+                    className={`flex items-center justify-center rounded-md border px-2 py-2 text-[13px] leading-tight transition ${
+                      active
+                        ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent-strong)]"
+                        : "border-[var(--line)] bg-[var(--panel-soft)] text-[var(--ink)] hover:border-[var(--line-strong)]"
+                    }`}
+                    key={f.id}
+                    onClick={() => onChange({ fontFamily: f.id })}
+                    style={{ fontFamily: f.cssFamily }}
+                    title={f.name}
+                    type="button"
+                  >
+                    {f.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+
+        <label className="grid gap-1">
+          <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">
+            Animation
+          </span>
+          <select
+            className="rounded-md border border-[var(--line)] bg-[var(--panel-soft)] px-2 py-1.5 text-xs focus:border-[var(--accent)] focus:outline-none"
+            onChange={(e) =>
+              onChange({ animation: e.target.value as OverlayAnimation })
+            }
+            value={overlay.animation ?? "fade"}
+          >
+            {OVERLAY_ANIMATIONS.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.label}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <p className="text-[10px] leading-4 text-[var(--muted)]">
+          Drag the handle in the preview to reposition.
+        </p>
+
+        <button
+          className="mt-2 rounded-md border border-[var(--line)] bg-[var(--panel-soft)] px-2 py-1.5 text-xs font-medium text-rose-600 transition hover:bg-rose-50 hover:text-rose-700"
+          onClick={onRemove}
+          type="button"
+        >
+          Delete overlay
+        </button>
+      </div>
+    </aside>
   );
 }

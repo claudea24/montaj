@@ -24,7 +24,7 @@ Authenticated; bucket `montaj-media` created (private); RLS verified via advisor
 
 ### Step 2 — Clerk auth ✅
 
-`@clerk/nextjs` installed. `<ClerkProvider>` in root layout. `src/middleware.ts` protects everything except `/sign-{in,up}` and the public API routes. `useSession`-based browser client in `src/lib/supabase-browser.ts` and `auth().getToken()`-based server client in `src/lib/supabase-server.ts`. Sign-in / sign-up pages mounted under `src/app/sign-{in,up}/[[...rest]]/page.tsx`.
+`@clerk/nextjs` installed. `<ClerkProvider>` in root layout. `src/middleware.ts` protects everything except `/sign-{in,up}` and the public API routes. `useSession`-based browser client in `src/lib/supabase-browser.ts`. Sign-in / sign-up pages mounted under `src/app/sign-{in,up}/[[...rest]]/page.tsx`. (Server-side Supabase client will be added when a server route first needs it — pattern: `createClient(URL, KEY, { accessToken: async () => (await auth()).getToken() })`.)
 
 ### Step 3 — Schema ✅ *(simplified)*
 
@@ -52,7 +52,7 @@ Project: **claudea24s-projects/montaj**. Live URL: <https://montaj-psi.vercel.ap
 
 - **Framework:** Next.js 16 App Router, Tailwind 4, TypeScript.
 - **Auth:** Clerk (`@clerk/nextjs`). Identity is the Clerk userId (`auth.jwt()->>'sub'`); there are no Supabase auth users.
-- **Backend:** Supabase (`uxvqnlfeghyxgxffiukz`). Browser uses `useSupabaseClient()` from `src/lib/supabase-browser.ts`; server routes use `createServerSupabaseClient()` from `src/lib/supabase-server.ts`.
+- **Backend:** Supabase (`uxvqnlfeghyxgxffiukz`). Browser uses `useSupabaseClient()` from `src/lib/supabase-browser.ts`. No server-side Supabase client yet — add when a server route first needs DB access (pattern: pass `accessToken: async () => (await auth()).getToken()` to `createClient`).
 - **Storage:** private bucket `montaj-media`; signed URLs (24 h TTL) are minted via `createSignedUrls` on project load.
 - **Autosave:** 15 s client interval; flips dirty when `timeline` / `selectedTrack` / `targetSeconds` changes. Save badge in top-right toolbar.
 - **Video engine:** Remotion 4.0.457 — `remotion`, `@remotion/player`, `@remotion/transitions` are all pinned to that minor. Do not bump only one of them; that produces two parallel `remotion` packages and breaks the player context at runtime.
@@ -219,7 +219,6 @@ curl -sS -D - -o /dev/null -H "Accept: text/html" https://montaj-psi.vercel.app/
 | `src/lib/media.ts` | `TimelineMedia` type, music library, auth-aware upload, asset row insert, `loadProjectAssets`, `resolveTimelineMediaUrls`, HEIC handling, `transcodeIfHevc`. |
 | `src/lib/projects.ts` | `projects` CRUD: `listProjects`, `createProject`, `getProject`, `updateProjectDocument`, `renameProject`, `deleteProject`. |
 | `src/lib/supabase-browser.ts` | `useSupabaseClient()` — Clerk session token via `useSession()`, memoized per session. |
-| `src/lib/supabase-server.ts` | `createServerSupabaseClient()` — `auth().getToken()` for server routes (not yet used in app code; ready when we add server data fetching). |
 | `src/app/api/analyze/route.ts` | Decodes data URLs to temp dir, spawns `scripts/analyze.sh`, parses JSON, heuristic fallback. **Public** (no Clerk gate in middleware) — abuse-able; tighten when we add quotas. |
 | `src/app/api/transcode-video/route.ts` | Streams uploads to `/tmp`, ffprobes codec, returns 204 if H.264, otherwise transcodes via `spawn('ffmpeg', …)` and returns `video/mp4`. 250 MB cap. **Public** for the same reason. |
 | `scripts/analyze.sh` | `claude -p` wrapper with strict JSON schema. Prints `structured_output`; exit 4 if absent. |

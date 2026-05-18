@@ -22,6 +22,7 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import type { TimelineMedia } from "@/lib/media";
+import type { Overlay } from "@/lib/overlays";
 
 // Floor pixel density so trim handles stay reachable when the timeline is very
 // long. Above this, "zoom = 1" means the whole reel fits the rail width;
@@ -56,6 +57,14 @@ export type TimelineRailProps = {
   onLibraryDrop: (libraryId: string, atIndex: number) => void;
   selectedClipId?: string | null;
   onSelectClip?: (id: string | null) => void;
+  overlays?: Overlay[];
+  selectedOverlayId?: string | null;
+  onSelectOverlay?: (id: string | null) => void;
+  onOverlayTimingChange?: (
+    id: string,
+    startSeconds: number,
+    durationSeconds: number,
+  ) => void;
 };
 
 export function TimelineRail({
@@ -77,6 +86,10 @@ export function TimelineRail({
   onLibraryDrop,
   selectedClipId,
   onSelectClip,
+  overlays,
+  selectedOverlayId,
+  onSelectOverlay,
+  onOverlayTimingChange,
 }: TimelineRailProps) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -469,6 +482,17 @@ export function TimelineRail({
               </SortableContext>
             </DndContext>
 
+            {overlays && overlays.length > 0 && beatPeriodSeconds ? (
+              <OverlayTrack
+                onSelectOverlay={onSelectOverlay}
+                onTimingChange={onOverlayTimingChange}
+                overlays={overlays}
+                pxPerSecond={pxPerBeat / beatPeriodSeconds}
+                railWidthPx={railWidthPx}
+                selectedOverlayId={selectedOverlayId}
+              />
+            ) : null}
+
             <div
               className="pointer-events-none absolute top-0 bottom-0 z-20 w-px bg-[var(--accent)]"
               style={{ left: `${playheadPx}px` }}
@@ -743,5 +767,165 @@ function DropIndicator({ leftPx }: { leftPx: number }) {
       className="pointer-events-none absolute top-0 bottom-0 z-30 w-0.5 -translate-x-1/2 rounded-full bg-[var(--accent)]"
       style={{ left: `${leftPx}px` }}
     />
+  );
+}
+
+type OverlayTrackProps = {
+  overlays: Overlay[];
+  pxPerSecond: number;
+  railWidthPx: number;
+  selectedOverlayId?: string | null;
+  onSelectOverlay?: (id: string | null) => void;
+  onTimingChange?: (
+    id: string,
+    startSeconds: number,
+    durationSeconds: number,
+  ) => void;
+};
+
+function OverlayTrack({
+  overlays,
+  pxPerSecond,
+  railWidthPx,
+  selectedOverlayId,
+  onSelectOverlay,
+  onTimingChange,
+}: OverlayTrackProps) {
+  return (
+    <div
+      className="relative mt-3 h-9"
+      data-overlay-track
+      style={{ width: `${railWidthPx}px` }}
+    >
+      {overlays.map((overlay) => (
+        <OverlayBar
+          isSelected={selectedOverlayId === overlay.id}
+          key={overlay.id}
+          onSelect={onSelectOverlay}
+          onTimingChange={onTimingChange}
+          overlay={overlay}
+          pxPerSecond={pxPerSecond}
+        />
+      ))}
+    </div>
+  );
+}
+
+type OverlayBarProps = {
+  overlay: Overlay;
+  pxPerSecond: number;
+  isSelected: boolean;
+  onSelect?: (id: string | null) => void;
+  onTimingChange?: (
+    id: string,
+    startSeconds: number,
+    durationSeconds: number,
+  ) => void;
+};
+
+function OverlayBar({
+  overlay,
+  pxPerSecond,
+  isSelected,
+  onSelect,
+  onTimingChange,
+}: OverlayBarProps) {
+  const dragRef = useRef<{
+    mode: "move" | "start" | "end";
+    pointerStartX: number;
+    initialStart: number;
+    initialDuration: number;
+  } | null>(null);
+
+  const beginDrag = (
+    mode: "move" | "start" | "end",
+    e: React.PointerEvent<HTMLDivElement>,
+  ) => {
+    e.stopPropagation();
+    (e.target as Element).setPointerCapture(e.pointerId);
+    dragRef.current = {
+      mode,
+      pointerStartX: e.clientX,
+      initialStart: overlay.startSeconds,
+      initialDuration: overlay.durationSeconds,
+    };
+  };
+
+  const handleMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || !onTimingChange || pxPerSecond <= 0) return;
+    const deltaSeconds = (e.clientX - drag.pointerStartX) / pxPerSecond;
+    if (drag.mode === "move") {
+      onTimingChange(
+        overlay.id,
+        Math.max(0, drag.initialStart + deltaSeconds),
+        drag.initialDuration,
+      );
+    } else if (drag.mode === "start") {
+      // Resize from the left: start moves, end stays put.
+      const end = drag.initialStart + drag.initialDuration;
+      const nextStart = Math.max(0, Math.min(end - 0.1, drag.initialStart + deltaSeconds));
+      onTimingChange(overlay.id, nextStart, end - nextStart);
+    } else {
+      // Resize from the right: end moves, start stays put.
+      const nextDuration = Math.max(0.1, drag.initialDuration + deltaSeconds);
+      onTimingChange(overlay.id, drag.initialStart, nextDuration);
+    }
+  };
+
+  const endDrag = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!dragRef.current) return;
+    (e.target as Element).releasePointerCapture?.(e.pointerId);
+    dragRef.current = null;
+  };
+
+  const leftPx = overlay.startSeconds * pxPerSecond;
+  const widthPx = Math.max(8, overlay.durationSeconds * pxPerSecond);
+
+  return (
+    <div
+      className={`absolute top-0 flex h-9 items-center overflow-hidden rounded-md border text-[11px] font-medium transition select-none ${
+        isSelected
+          ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent-strong)]"
+          : "border-[var(--line)] bg-[var(--panel-soft)] text-[var(--ink-soft)] hover:border-[var(--line-strong)]"
+      }`}
+      data-overlay-bar
+      data-overlay-id={overlay.id}
+      onClick={(e) => {
+        e.stopPropagation();
+        onSelect?.(overlay.id);
+      }}
+      onPointerDown={(e) => beginDrag("move", e)}
+      onPointerMove={handleMove}
+      onPointerUp={endDrag}
+      style={{
+        left: `${leftPx}px`,
+        width: `${widthPx}px`,
+        cursor: "grab",
+      }}
+    >
+      <div
+        className="absolute left-0 top-0 h-full w-2 cursor-ew-resize bg-transparent hover:bg-[var(--accent)]/30"
+        data-overlay-handle="start"
+        onPointerDown={(e) => beginDrag("start", e)}
+        onPointerMove={handleMove}
+        onPointerUp={endDrag}
+      />
+      <div className="pointer-events-none flex w-full items-center gap-1 px-3">
+        <span className="text-base leading-none">
+          {overlay.kind === "emoji" ? overlay.content : "T"}
+        </span>
+        <span className="truncate">
+          {overlay.kind === "text" ? overlay.content || "Text" : "Emoji"}
+        </span>
+      </div>
+      <div
+        className="absolute right-0 top-0 h-full w-2 cursor-ew-resize bg-transparent hover:bg-[var(--accent)]/30"
+        data-overlay-handle="end"
+        onPointerDown={(e) => beginDrag("end", e)}
+        onPointerMove={handleMove}
+        onPointerUp={endDrag}
+      />
+    </div>
   );
 }

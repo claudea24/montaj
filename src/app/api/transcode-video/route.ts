@@ -52,12 +52,16 @@ export async function POST(req: NextRequest) {
 
     const { codec, formatName } = await probeVideo(inputPath);
     const isHevc = codec === "hevc" || codec === "h265";
+    // ffprobe reports format_name as a comma-separated list of every container
+    // alias that matches (e.g. ".mp4" files come back as
+    // "mov,mp4,m4a,3gp,3g2,mj2"). A substring `includes("mov")` therefore
+    // matched every MP4 too and forced an unnecessary re-encode. Use the file
+    // extension instead, which is the only reliable MOV signal we have here.
     const isMovContainer =
-      (formatName ?? "").includes("mov") ||
-      (formatName ?? "").includes("quicktime") ||
-      /\.(mov|m4v)$/i.test(file.name);
+      /\.(mov|m4v)$/i.test(file.name) ||
+      (formatName ?? "").split(",").includes("quicktime");
 
-    // Anything MOV-container or HEVC gets a full re-encode. A naive `-c copy`
+    // HEVC or MOV-container inputs get a full re-encode. A naive `-c copy`
     // remux preserves variable frame rate and out-of-order PTS, which causes
     // the "section repeats / freeze near end" symptoms during browser
     // playback. We always normalize to constant 30 fps H.264 with predictable

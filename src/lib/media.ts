@@ -156,7 +156,10 @@ async function normalizeUploadedVideo(file: File): Promise<NormalizedVideo> {
     return { file, durationSeconds: null };
   }
   const buffer = await res.arrayBuffer();
-  const baseName = file.name.replace(/\.(mov|m4v|hevc)$/i, "") || "clip";
+  // Strip any video extension so a re-encoded .mp4 input doesn't become
+  // "file.mp4.mp4". The route only ships .mp4 output, so a single .mp4
+  // suffix is the right end state regardless of the input container.
+  const baseName = file.name.replace(/\.(mov|m4v|hevc|mp4|m4a|3gp|webm|mkv|avi)$/i, "") || "clip";
   const transcoded = new File([buffer], `${baseName}.mp4`, { type: "video/mp4" });
   const headerDur = Number(res.headers.get("x-output-duration") ?? "");
   return {

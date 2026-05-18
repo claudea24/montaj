@@ -2,6 +2,7 @@ import {
   AbsoluteFill,
   Img,
   Loop,
+  Sequence,
   Video,
   staticFile,
   useCurrentFrame,
@@ -18,6 +19,8 @@ import { fade } from "@remotion/transitions/fade";
 import { slide } from "@remotion/transitions/slide";
 import { wipe } from "@remotion/transitions/wipe";
 import type { TimelineMedia } from "@/lib/media";
+import type { Overlay } from "@/lib/overlays";
+import { fontFamilyFor } from "@/lib/fonts";
 
 type SlideshowCompositionProps = {
   images: TimelineMedia[];
@@ -28,6 +31,7 @@ type SlideshowCompositionProps = {
   fallbackSecondsPerImage: number;
   captions?: string[];
   transitionFrames?: number;
+  overlays?: Overlay[];
 };
 
 const PRESENTATION_CYCLE = ["fade", "slide", "wipe"] as const;
@@ -48,6 +52,7 @@ export function SlideshowComposition({
   fallbackSecondsPerImage,
   captions,
   transitionFrames = 12,
+  overlays,
 }: SlideshowCompositionProps) {
   const { fps } = useVideoConfig();
 
@@ -124,6 +129,23 @@ export function SlideshowComposition({
         })}
       </TransitionSeries>
 
+      {overlays && overlays.length > 0
+        ? overlays.map((overlay) => {
+            const from = Math.max(0, Math.round(overlay.startSeconds * fps));
+            const dur = Math.max(1, Math.round(overlay.durationSeconds * fps));
+            return (
+              <Sequence
+                key={overlay.id}
+                durationInFrames={dur}
+                from={from}
+                layout="none"
+              >
+                <OverlayRender overlay={overlay} totalFrames={dur} />
+              </Sequence>
+            );
+          })
+        : null}
+
       {soundtrackLoopFrames && soundtrackLoopFrames > 0 ? (
         <Loop durationInFrames={soundtrackLoopFrames}>
           <Html5Audio src={soundtrackSrc} volume={0.55} />
@@ -131,6 +153,88 @@ export function SlideshowComposition({
       ) : (
         <Html5Audio src={soundtrackSrc} volume={0.55} />
       )}
+    </AbsoluteFill>
+  );
+}
+
+function OverlayRender({
+  overlay,
+  totalFrames,
+}: {
+  overlay: Overlay;
+  totalFrames: number;
+}) {
+  const isText = overlay.kind === "text";
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  const animation = overlay.animation ?? "fade";
+
+  // In/out windows clamp to ~0.3s each, but never more than 40% of the
+  // overlay's total duration so very short overlays still appear.
+  const animFrames = Math.min(
+    Math.round(0.3 * fps),
+    Math.max(2, Math.floor(totalFrames * 0.4)),
+  );
+  const inEnd = animFrames;
+  const outStart = Math.max(inEnd, totalFrames - animFrames);
+
+  const inProgress =
+    animFrames === 0 ? 1 : Math.min(1, Math.max(0, frame / animFrames));
+  const outProgress =
+    animFrames === 0
+      ? 0
+      : Math.min(1, Math.max(0, (frame - outStart) / animFrames));
+
+  let opacity = 1;
+  let translateY = 0;
+  let scale = 1;
+
+  if (animation === "fade") {
+    opacity = inProgress * (1 - outProgress);
+  } else if (animation === "slide-up") {
+    opacity = inProgress * (1 - outProgress);
+    // Slide in from below, slide out upward.
+    const inOffset = (1 - inProgress) * 80;
+    const outOffset = outProgress * -80;
+    translateY = inOffset + outOffset;
+  } else if (animation === "zoom") {
+    opacity = inProgress * (1 - outProgress);
+    const inScale = 0.6 + inProgress * 0.4;
+    const outScale = 1 - outProgress * 0.4;
+    scale = Math.min(inScale, outScale);
+  }
+
+  return (
+    <AbsoluteFill
+      style={{
+        pointerEvents: "none",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <div
+        style={{
+          position: "absolute",
+          left: `${overlay.x * 100}%`,
+          top: `${overlay.y * 100}%`,
+          transform: `translate(-50%, -50%) translateY(${translateY}px) scale(${scale})`,
+          opacity,
+          fontSize: overlay.fontSize,
+          fontFamily: isText
+            ? fontFamilyFor(overlay.fontFamily)
+            : "system-ui, 'Apple Color Emoji', 'Segoe UI Emoji', 'Noto Color Emoji', sans-serif",
+          fontWeight: isText ? 700 : 400,
+          color: isText ? (overlay.color ?? "#ffffff") : undefined,
+          textShadow: isText ? "0 4px 32px rgba(0,0,0,0.55)" : undefined,
+          lineHeight: 1.1,
+          whiteSpace: "pre-wrap",
+          textAlign: "center",
+          userSelect: "none",
+        }}
+      >
+        {overlay.content}
+      </div>
     </AbsoluteFill>
   );
 }
@@ -173,9 +277,10 @@ function SlotContent({ item, index, totalFrames, startFrom, caption }: SlotConte
     <AbsoluteFill style={{ alignItems: "center", justifyContent: "center" }}>
       {isVideo ? (
         <Video
-          // Tight enough to resync on drift but loose enough that brief
-          // network/codec stalls don't cause stutter on every frame.
-          acceptableTimeShiftInSeconds={1}
+          // Wide tolerance so brief drift (dev-mode render lag, codec stalls)
+          // doesn't trigger backward seeks that the user perceives as the
+          // clip repeating itself.
+          acceptableTimeShiftInSeconds={10}
           muted
           pauseWhenBuffering={false}
           src={item.src}

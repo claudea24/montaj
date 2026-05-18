@@ -2,6 +2,10 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,
+  // Allow running a second `next dev` (e.g., a test instance) in parallel
+  // with the primary one by overriding the output dir via env. Default `.next`
+  // matches Next.js's own default.
+  distDir: process.env.NEXT_DIST_DIR ?? ".next",
   // Keep the installer packages out of Turbopack's bundle graph. They load
   // platform-specific subfolders via runtime `require` and ship non-JS files
   // (READMEs, binaries) that Turbopack can't classify.

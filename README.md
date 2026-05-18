@@ -86,7 +86,6 @@ Next.js 16 (App Router) · Tailwind 4 · TypeScript · `@clerk/nextjs` · `@supa
 | `src/lib/media.ts` | `TimelineMedia` type, music library, auth-aware upload, asset row insert, signed-URL resolution for library / timeline reloads, HEIC handling, HEVC transcode call. |
 | `src/lib/projects.ts` | `projects` CRUD: list / create / get / update document / rename / delete. |
 | `src/lib/supabase-browser.ts` | `useSupabaseClient()` hook — Clerk-session-aware client. |
-| `src/lib/supabase-server.ts` | `createServerSupabaseClient()` — `auth().getToken()`-based for server routes. |
 | `src/app/api/analyze/route.ts` | AI scoring. Decodes data URLs, spawns `scripts/analyze.sh`, parses JSON, heuristic fallback. |
 | `src/app/api/transcode-video/route.ts` | HEVC → H.264 transcode. Streams upload to `/tmp`, ffprobes codec, returns 204 if H.264, otherwise re-encodes via ffmpeg. |
 | `scripts/analyze.sh` | `claude -p` headless wrapper with `--json-schema` and minimal `--system-prompt`. |

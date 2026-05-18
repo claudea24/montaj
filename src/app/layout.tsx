@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { ClerkProvider } from "@clerk/nextjs";
+import { OVERLAY_FONT_VARIABLES } from "@/lib/fonts";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -15,7 +16,9 @@ export default function RootLayout({
   return (
     <ClerkProvider>
       <html lang="en">
-        <body suppressHydrationWarning>{children}</body>
+        <body className={OVERLAY_FONT_VARIABLES} suppressHydrationWarning>
+          {children}
+        </body>
       </html>
     </ClerkProvider>
   );
