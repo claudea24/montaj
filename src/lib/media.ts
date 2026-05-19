@@ -32,6 +32,15 @@ export type MusicTrack = {
   durationLabel: string;
   description: string;
   src: string;
+  // Loop length for the soundtrack. Built-in tracks are 24s loops; user
+  // uploads carry their actual duration so the player loops at the right
+  // point. Falls back to MUSIC_LENGTH_SECONDS upstream.
+  durationSeconds?: number;
+  // True for user-uploaded tracks — used by the Audio panel to show a remove
+  // button and tag them as "Custom".
+  custom?: boolean;
+  // Storage object key (custom tracks only); kept for delete + signed-URL refresh.
+  storagePath?: string;
 };
 
 export const MUSIC_LIBRARY: MusicTrack[] = [
@@ -361,6 +370,7 @@ export async function loadProjectAssets(
       "id, kind, name, size_bytes, storage_path, duration_seconds, created_at",
     )
     .eq("project_id", projectId)
+    .in("kind", ["image", "video"])
     .order("created_at", { ascending: false });
   if (error) throw new Error(`loadProjectAssets: ${error.message}`);
   if (!rows || rows.length === 0) return [];
@@ -430,6 +440,143 @@ export async function resolveTimelineMediaUrls(
     // else: stale blob URL with no backing storage — drop it.
   }
   return resolved;
+}
+
+function formatAudioDuration(secs: number | null | undefined): string {
+  if (!secs || !Number.isFinite(secs)) return "—";
+  const m = Math.floor(secs / 60);
+  const s = Math.floor(secs % 60);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function trackNameFromFile(name: string): string {
+  return name.replace(/\.[^.]+$/, "").trim() || name;
+}
+
+async function probeAudioDuration(file: File): Promise<number | null> {
+  return new Promise((resolve) => {
+    const url = URL.createObjectURL(file);
+    const audio = new Audio();
+    audio.preload = "metadata";
+    const done = (val: number | null) => {
+      URL.revokeObjectURL(url);
+      resolve(val);
+    };
+    audio.onloadedmetadata = () =>
+      done(Number.isFinite(audio.duration) ? audio.duration : null);
+    audio.onerror = () => done(null);
+    audio.src = url;
+  });
+}
+
+export async function loadProjectAudioTracks(
+  supabase: SupabaseClient,
+  projectId: string,
+): Promise<MusicTrack[]> {
+  const { data: rows, error } = await supabase
+    .from("assets")
+    .select("id, name, storage_path, duration_seconds, created_at")
+    .eq("project_id", projectId)
+    .eq("kind", "audio")
+    .order("created_at", { ascending: true });
+  if (error) throw new Error(`loadProjectAudioTracks: ${error.message}`);
+  if (!rows || rows.length === 0) return [];
+  const paths = rows.map((r) => r.storage_path as string);
+  const { data: signed, error: signError } = await supabase.storage
+    .from(SUPABASE_BUCKET)
+    .createSignedUrls(paths, ASSET_URL_TTL_SECONDS);
+  if (signError) throw new Error(`signed URLs: ${signError.message}`);
+  const urlByPath = new Map<string, string>();
+  for (const s of signed ?? []) {
+    if (s.path && s.signedUrl) urlByPath.set(s.path, s.signedUrl);
+  }
+  return rows.map((r) => {
+    const dur =
+      typeof r.duration_seconds === "number"
+        ? (r.duration_seconds as number)
+        : null;
+    return {
+      id: r.id as string,
+      name: trackNameFromFile(r.name as string),
+      mood: "Custom",
+      durationLabel: formatAudioDuration(dur),
+      description: "Your uploaded track.",
+      src: urlByPath.get(r.storage_path as string) ?? "",
+      durationSeconds: dur ?? undefined,
+      custom: true,
+      storagePath: r.storage_path as string,
+    };
+  });
+}
+
+export async function uploadAudioFileToSupabase(
+  ctx: UploadContext,
+  file: File,
+): Promise<MusicTrack> {
+  const { supabase, userId, projectId } = ctx;
+  if (!supabase || !userId || !projectId) {
+    throw new Error(
+      "Audio upload requires a saved project — open or create one first.",
+    );
+  }
+
+  const durationSeconds = await probeAudioDuration(file);
+
+  const safeName = file.name.replace(/[^A-Za-z0-9._-]/g, "_");
+  const key = `${userId}/${projectId}/${crypto.randomUUID()}-${safeName}`;
+
+  const { error: uploadError } = await supabase.storage
+    .from(SUPABASE_BUCKET)
+    .upload(key, file, { cacheControl: "3600", upsert: false });
+  if (uploadError) throw new Error(`audio upload: ${uploadError.message}`);
+
+  const { data: asset, error: insertError } = await supabase
+    .from("assets")
+    .insert({
+      user_id: userId,
+      project_id: projectId,
+      kind: "audio",
+      name: file.name,
+      size_bytes: file.size,
+      storage_path: key,
+      duration_seconds: durationSeconds,
+    })
+    .select("id")
+    .single();
+  if (insertError) throw new Error(`audio asset insert: ${insertError.message}`);
+
+  const { data: signed, error: signError } = await supabase.storage
+    .from(SUPABASE_BUCKET)
+    .createSignedUrl(key, ASSET_URL_TTL_SECONDS);
+  if (signError) throw new Error(`audio signed URL: ${signError.message}`);
+
+  return {
+    id: asset?.id as string,
+    name: trackNameFromFile(file.name),
+    mood: "Custom",
+    durationLabel: formatAudioDuration(durationSeconds),
+    description: "Your uploaded track.",
+    src: signed?.signedUrl ?? "",
+    durationSeconds: durationSeconds ?? undefined,
+    custom: true,
+    storagePath: key,
+  };
+}
+
+export async function deleteAudioAsset(
+  supabase: SupabaseClient,
+  assetId: string,
+  storagePath: string,
+): Promise<void> {
+  const { error: rmError } = await supabase.storage
+    .from(SUPABASE_BUCKET)
+    .remove([storagePath]);
+  if (rmError) throw new Error(`audio storage remove: ${rmError.message}`);
+  const { error: delError } = await supabase
+    .from("assets")
+    .delete()
+    .eq("id", assetId);
+  if (delError) throw new Error(`audio asset delete: ${delError.message}`);
 }
 
 export async function uploadFilesToSupabase(

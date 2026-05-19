@@ -20,6 +20,7 @@ import { slide } from "@remotion/transitions/slide";
 import { wipe } from "@remotion/transitions/wipe";
 import type { TimelineMedia } from "@/lib/media";
 import type { Overlay } from "@/lib/overlays";
+import { twemojiUrlFor } from "@/lib/overlays";
 import { fontFamilyFor } from "@/lib/fonts";
 
 type SlideshowCompositionProps = {
@@ -32,6 +33,9 @@ type SlideshowCompositionProps = {
   captions?: string[];
   transitionFrames?: number;
   overlays?: Overlay[];
+  // When set, the matching overlay renders fully transparent so the inline
+  // editor in the drag layer above the player is the only visible copy.
+  editingOverlayId?: string | null;
 };
 
 const PRESENTATION_CYCLE = ["fade", "slide", "wipe"] as const;
@@ -53,6 +57,7 @@ export function SlideshowComposition({
   captions,
   transitionFrames = 12,
   overlays,
+  editingOverlayId,
 }: SlideshowCompositionProps) {
   const { fps } = useVideoConfig();
 
@@ -133,6 +138,7 @@ export function SlideshowComposition({
         ? overlays.map((overlay) => {
             const from = Math.max(0, Math.round(overlay.startSeconds * fps));
             const dur = Math.max(1, Math.round(overlay.durationSeconds * fps));
+            const isEditing = editingOverlayId === overlay.id;
             return (
               <Sequence
                 key={overlay.id}
@@ -140,7 +146,11 @@ export function SlideshowComposition({
                 from={from}
                 layout="none"
               >
-                <OverlayRender overlay={overlay} totalFrames={dur} />
+                <OverlayRender
+                  hidden={isEditing}
+                  overlay={overlay}
+                  totalFrames={dur}
+                />
               </Sequence>
             );
           })
@@ -160,9 +170,11 @@ export function SlideshowComposition({
 function OverlayRender({
   overlay,
   totalFrames,
+  hidden,
 }: {
   overlay: Overlay;
   totalFrames: number;
+  hidden?: boolean;
 }) {
   const isText = overlay.kind === "text";
   const frame = useCurrentFrame();
@@ -218,8 +230,9 @@ function OverlayRender({
           position: "absolute",
           left: `${overlay.x * 100}%`,
           top: `${overlay.y * 100}%`,
+          width: `${(overlay.widthFraction ?? 0.7) * 100}%`,
           transform: `translate(-50%, -50%) translateY(${translateY}px) scale(${scale})`,
-          opacity,
+          opacity: hidden ? 0 : opacity,
           fontSize: overlay.fontSize,
           fontFamily: isText
             ? fontFamilyFor(overlay.fontFamily)
@@ -227,13 +240,31 @@ function OverlayRender({
           fontWeight: isText ? 700 : 400,
           color: isText ? (overlay.color ?? "#ffffff") : undefined,
           textShadow: isText ? "0 4px 32px rgba(0,0,0,0.55)" : undefined,
-          lineHeight: 1.1,
+          lineHeight: 1.15,
           whiteSpace: "pre-wrap",
+          wordBreak: "break-word",
           textAlign: "center",
           userSelect: "none",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
         }}
       >
-        {overlay.content}
+        {isText ? (
+          overlay.content
+        ) : (
+          <img
+            alt=""
+            draggable={false}
+            src={twemojiUrlFor(overlay.content)}
+            style={{
+              width: overlay.fontSize,
+              height: overlay.fontSize,
+              filter: "drop-shadow(0 6px 12px rgba(0,0,0,0.35))",
+              objectFit: "contain",
+            }}
+          />
+        )}
       </div>
     </AbsoluteFill>
   );

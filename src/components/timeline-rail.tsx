@@ -913,10 +913,10 @@ function OverlayBar({
       />
       <div className="pointer-events-none flex w-full items-center gap-1 px-3">
         <span className="text-base leading-none">
-          {overlay.kind === "emoji" ? overlay.content : "T"}
+          {overlay.kind === "sticker" ? overlay.content : "T"}
         </span>
         <span className="truncate">
-          {overlay.kind === "text" ? overlay.content || "Text" : "Emoji"}
+          {overlay.kind === "text" ? overlay.content || "Text" : "Sticker"}
         </span>
       </div>
       <div

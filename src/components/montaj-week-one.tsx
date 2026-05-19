@@ -11,11 +11,14 @@ import {
   type MusicTrack,
   type TimelineMedia,
   backfillVideoThumbnails,
+  deleteAudioAsset,
   extractVideoThumbnails,
   formatBytes,
   getStorageStatus,
   loadProjectAssets,
+  loadProjectAudioTracks,
   resolveTimelineMediaUrls,
+  uploadAudioFileToSupabase,
   uploadFilesToSupabase,
 } from "@/lib/media";
 import { useSupabaseClient } from "@/lib/supabase-browser";
@@ -33,10 +36,13 @@ import { detectBeats, type BeatGrid } from "@/lib/beats";
 import { imageSrcToDataUrl } from "@/lib/photo-thumb";
 import type { AnalysisResult } from "@/lib/ai";
 import {
-  createEmojiOverlay,
+  createStickerOverlay,
   createTextOverlay,
   EMOJI_PALETTE,
+  migrateLoadedOverlay,
   OVERLAY_ANIMATIONS,
+  STICKER_PALETTE,
+  twemojiUrlFor,
   type Overlay,
   type OverlayAnimation,
 } from "@/lib/overlays";
@@ -68,6 +74,7 @@ type NavSection =
   | "media"
   | "audio"
   | "text"
+  | "stickers"
   | "captions"
   | "effects"
   | "transitions"
@@ -87,7 +94,20 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
   const userId = user?.id ?? null;
   const [timeline, setTimeline] = useState<TimelineMedia[]>([]);
   const [library, setLibrary] = useState<TimelineMedia[]>([]);
-  const [selectedTrack, setSelectedTrack] = useState<MusicTrack>(MUSIC_LIBRARY[0]);
+  const [customTracks, setCustomTracks] = useState<MusicTrack[]>([]);
+  const [selectedTrackId, setSelectedTrackId] = useState<string>(
+    MUSIC_LIBRARY[0].id,
+  );
+  const allTracks = useMemo(
+    () => [...MUSIC_LIBRARY, ...customTracks],
+    [customTracks],
+  );
+  const selectedTrack: MusicTrack = useMemo(
+    () =>
+      allTracks.find((t) => t.id === selectedTrackId) ?? MUSIC_LIBRARY[0],
+    [allTracks, selectedTrackId],
+  );
+  const [audioUploading, setAudioUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [navSection, setNavSection] = useState<NavSection>(
@@ -109,6 +129,7 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [overlays, setOverlays] = useState<Overlay[]>([]);
   const [selectedOverlayId, setSelectedOverlayId] = useState<string | null>(null);
+  const [editingOverlayId, setEditingOverlayId] = useState<string | null>(null);
   const [projectLoaded, setProjectLoaded] = useState(false);
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">(
     "idle",
@@ -244,17 +265,17 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
               cur.map((it) => (it.id === id ? { ...it, previewFrames: frames } : it)),
             );
           });
-          const track =
-            MUSIC_LIBRARY.find((t) => t.id === doc.selectedTrackId) ??
-            MUSIC_LIBRARY[0];
-          setSelectedTrack(track);
+          // Just pin the saved id; the derivation picks the actual track from
+          // MUSIC_LIBRARY or customTracks once they load.
+          setSelectedTrackId(doc.selectedTrackId ?? MUSIC_LIBRARY[0].id);
           setTargetSeconds(doc.targetSeconds ?? DEFAULT_TARGET_SECONDS);
-          setOverlays(doc.overlays ?? []);
+          const migratedOverlays = (doc.overlays ?? []).map(migrateLoadedOverlay);
+          setOverlays(migratedOverlays);
           loadedDoc = {
             timeline: resolvedTimeline,
-            selectedTrackId: track.id,
+            selectedTrackId: doc.selectedTrackId ?? MUSIC_LIBRARY[0].id,
             targetSeconds: doc.targetSeconds ?? DEFAULT_TARGET_SECONDS,
-            overlays: doc.overlays ?? [],
+            overlays: migratedOverlays,
           };
         }
         // Mark loaded for both branches (project with document, and a fresh
@@ -303,6 +324,33 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
         if (!cancelled) {
           setStatusMessage(
             `Failed to load assets: ${e instanceof Error ? e.message : "unknown error"}`,
+          );
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [supabase, projectId]);
+
+  // Load user-uploaded audio tracks for this project so they appear in the
+  // Audio panel alongside the built-in MUSIC_LIBRARY.
+  useEffect(() => {
+    if (!supabase || !projectId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setCustomTracks([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const tracks = await loadProjectAudioTracks(supabase, projectId);
+        if (cancelled) return;
+        setCustomTracks(tracks);
+      } catch (e) {
+        if (!cancelled) {
+          setStatusMessage(
+            `Failed to load audio tracks: ${e instanceof Error ? e.message : "unknown error"}`,
           );
         }
       }
@@ -437,6 +485,28 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
     }
     return sum;
   }, [perSlotFrames]);
+
+  // Player-composition start frame of each clip on the timeline. Same overlap
+  // formula as totalFrames so click-to-seek lands exactly where the player
+  // renders clip N's first frame.
+  const perSlotPlayerStartFrames = useMemo(() => {
+    if (perSlotFrames.length === 0) return [] as number[];
+    const starts: number[] = [0];
+    let acc = 0;
+    for (let i = 0; i < perSlotFrames.length - 1; i += 1) {
+      const overlap = Math.max(
+        2,
+        Math.min(
+          TRANSITION_FRAMES,
+          Math.floor(perSlotFrames[i] / 2),
+          Math.floor(perSlotFrames[i + 1] / 2),
+        ),
+      );
+      acc += perSlotFrames[i] - overlap;
+      starts.push(acc);
+    }
+    return starts;
+  }, [perSlotFrames]);
   const durationInFrames =
     timeline.length === 0 ? FPS * 5 : Math.max(totalFrames, 1);
   const totalSeconds = totalFrames / FPS;
@@ -470,14 +540,17 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
             },
           ],
     soundtrackSrc: selectedTrack.src,
-    soundtrackLoopFrames: Math.round(MUSIC_LENGTH_SECONDS * FPS),
+    soundtrackLoopFrames: Math.round(
+      (selectedTrack.durationSeconds ?? MUSIC_LENGTH_SECONDS) * FPS,
+    ),
     perSlotFrames: timeline.length > 0 ? perSlotFrames : undefined,
     perSlotStartFrames: timeline.length > 0 ? perSlotStartFrames : undefined,
     fallbackSecondsPerImage: FALLBACK_SECONDS_PER_IMAGE,
     captions: timeline.length > 0 ? captions : undefined,
     transitionFrames: TRANSITION_FRAMES,
     overlays,
-  }), [timeline, selectedTrack.src, perSlotFrames, perSlotStartFrames, captions, overlays]);
+    editingOverlayId,
+  }), [timeline, selectedTrack.src, selectedTrack.durationSeconds, perSlotFrames, perSlotStartFrames, captions, overlays, editingOverlayId]);
   function removeItem(id: string) {
     setTimeline((current) => {
       const removed = current.find((it) => it.id === id);
@@ -527,6 +600,52 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
         return { ...it, beats, videoStartBeats: 0 };
       }),
     );
+  }
+
+  async function handleAudioFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    if (!supabase || !userId || !projectId) {
+      setStatusMessage("Open or create a project before uploading audio.");
+      return;
+    }
+    setAudioUploading(true);
+    setStatusMessage("Uploading audio…");
+    try {
+      const uploaded: MusicTrack[] = [];
+      for (const file of Array.from(files)) {
+        const track = await uploadAudioFileToSupabase(
+          { supabase, userId, projectId },
+          file,
+        );
+        uploaded.push(track);
+      }
+      setCustomTracks((cur) => [...cur, ...uploaded]);
+      if (uploaded.length > 0) setSelectedTrackId(uploaded[0].id);
+      setStatusMessage(
+        `${uploaded.length} track${uploaded.length === 1 ? "" : "s"} uploaded.`,
+      );
+    } catch (error) {
+      setStatusMessage(
+        `Audio upload failed: ${error instanceof Error ? error.message : "unknown error"}`,
+      );
+    } finally {
+      setAudioUploading(false);
+    }
+  }
+
+  async function removeCustomTrack(track: MusicTrack) {
+    if (!supabase || !track.storagePath) return;
+    try {
+      await deleteAudioAsset(supabase, track.id, track.storagePath);
+      setCustomTracks((cur) => cur.filter((t) => t.id !== track.id));
+      if (selectedTrackId === track.id) {
+        setSelectedTrackId(MUSIC_LIBRARY[0].id);
+      }
+    } catch (error) {
+      setStatusMessage(
+        `Could not remove track: ${error instanceof Error ? error.message : "unknown error"}`,
+      );
+    }
   }
 
   async function handleFiles(files: FileList | null) {
@@ -603,20 +722,40 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
     return { startSeconds: safeStart, durationSeconds: safeDur };
   }
 
+  function seekToOverlayMid(overlay: Overlay) {
+    // Land the playhead in the middle of the overlay's window so the user
+    // sees the text/emoji fully visible while editing — past any fade/zoom/
+    // slide-up animation that would otherwise show opacity 0 at the boundary.
+    const targetSeconds = overlay.startSeconds + overlay.durationSeconds * 0.5;
+    seekTo(targetSeconds * FPS);
+  }
+
   function addTextOverlay() {
     const start = currentFrame / FPS;
     const overlay = createTextOverlay("Your text here", start);
     setOverlays((cur) => [...cur, overlay]);
     setSelectedOverlayId(overlay.id);
     setSelectedClipId(null);
+    setEditingOverlayId(overlay.id);
+    seekToOverlayMid(overlay);
   }
 
-  function addEmojiOverlay(emoji: string) {
+  function addStickerOverlay(glyph: string) {
     const start = currentFrame / FPS;
-    const overlay = createEmojiOverlay(emoji, start);
+    const overlay = createStickerOverlay(glyph, start);
     setOverlays((cur) => [...cur, overlay]);
     setSelectedOverlayId(overlay.id);
     setSelectedClipId(null);
+    seekToOverlayMid(overlay);
+  }
+
+  function beginEditingOverlay(id: string) {
+    const overlay = overlays.find((o) => o.id === id);
+    if (!overlay || overlay.kind !== "text") return;
+    setSelectedOverlayId(id);
+    setSelectedClipId(null);
+    setEditingOverlayId(id);
+    seekToOverlayMid(overlay);
   }
 
   function updateOverlay(id: string, patch: Partial<Overlay>) {
@@ -641,6 +780,40 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
     setOverlays((cur) => cur.filter((o) => o.id !== id));
     if (selectedOverlayId === id) setSelectedOverlayId(null);
   }
+
+  // Delete/Backspace removes the currently selected overlay or clip. Skipped
+  // when focus is inside a typing surface so users can still backspace inside
+  // text fields, the inline preview editor, the right-panel inputs, etc.
+  useEffect(() => {
+    function isTypingTarget(el: EventTarget | null): boolean {
+      const node = el as (HTMLElement & { isContentEditable?: boolean }) | null;
+      if (!node) return false;
+      if (node.tagName === "INPUT" || node.tagName === "TEXTAREA") return true;
+      if (node.isContentEditable) return true;
+      return false;
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Delete" && e.key !== "Backspace") return;
+      if (isTypingTarget(e.target)) return;
+      if (editingOverlayId != null) return;
+      if (selectedOverlayId != null) {
+        e.preventDefault();
+        removeOverlay(selectedOverlayId);
+        return;
+      }
+      if (selectedClipId != null) {
+        e.preventDefault();
+        const id = selectedClipId;
+        setSelectedClipId(null);
+        removeItem(id);
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+    // removeOverlay / removeItem are stable enough — they only close over
+    // setState setters; re-binding when ids change is sufficient.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedOverlayId, selectedClipId, editingOverlayId]);
 
   const selectedOverlay = useMemo(
     () => overlays.find((o) => o.id === selectedOverlayId) ?? null,
@@ -714,17 +887,26 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
 
   // Clicking anywhere outside the right panel dismisses it. Clip/overlay
   // clicks already stopPropagation in the rail, so picking another item still
-  // works.
+  // works. The inline text editor inside the preview also stops propagation
+  // so typing doesn't trigger this.
   const handleMainClick = useCallback(
     (e: React.MouseEvent<HTMLElement>) => {
-      if (selectedClipId == null && selectedOverlayId == null) return;
+      if (
+        selectedClipId == null &&
+        selectedOverlayId == null &&
+        editingOverlayId == null
+      ) {
+        return;
+      }
       const target = e.target as HTMLElement | null;
       if (!target) return;
       if (target.closest("[data-right-panel]")) return;
+      if (target.closest("[data-overlay-drag-layer]")) return;
       setSelectedClipId(null);
       setSelectedOverlayId(null);
+      setEditingOverlayId(null);
     },
-    [selectedClipId, selectedOverlayId],
+    [selectedClipId, selectedOverlayId, editingOverlayId],
   );
 
   return (
@@ -773,12 +955,16 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
           isDragging={isDragging}
           isUploading={isUploading}
           library={library}
-          onAddEmoji={addEmojiOverlay}
+          audioUploading={audioUploading}
+          customTracks={customTracks}
+          onAddSticker={addStickerOverlay}
           onAddText={addTextOverlay}
+          onAudioFiles={handleAudioFiles}
           onFiles={handleFiles}
+          onRemoveCustomTrack={removeCustomTrack}
           onRemoveLibrary={removeLibraryItem}
           onRunAi={runAIAnalysis}
-          onSelectTrack={setSelectedTrack}
+          onSelectTrack={(t) => setSelectedTrackId(t.id)}
           onSetDragging={setIsDragging}
           section={navSection}
           selectedTrack={selectedTrack}
@@ -807,11 +993,20 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
             />
             <OverlayDragLayer
               currentFrame={currentFrame}
+              editingOverlayId={editingOverlayId}
               fps={FPS}
+              onBeginEdit={beginEditingOverlay}
               onChange={updateOverlay}
+              onEndEdit={() => setEditingOverlayId(null)}
               onSelect={(id) => {
                 setSelectedOverlayId(id);
                 if (id != null) setSelectedClipId(null);
+                if (id !== editingOverlayId) setEditingOverlayId(null);
+                if (id != null) {
+                  const o = overlays.find((ov) => ov.id === id);
+                  // Mid-point so we land past the fade-in animation.
+                  if (o) seekToOverlayMid(o);
+                }
               }}
               overlays={overlays}
               selectedOverlayId={selectedOverlayId}
@@ -846,11 +1041,23 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
             onSeek={seekTo}
             onSelectClip={(id) => {
               setSelectedClipId(id);
-              if (id != null) setSelectedOverlayId(null);
+              if (id != null) {
+                setSelectedOverlayId(null);
+                const idx = timeline.findIndex((it) => it.id === id);
+                if (idx >= 0) {
+                  seekTo(perSlotPlayerStartFrames[idx] ?? 0);
+                }
+              }
             }}
             onSelectOverlay={(id) => {
               setSelectedOverlayId(id);
-              if (id != null) setSelectedClipId(null);
+              if (id != null) {
+                setSelectedClipId(null);
+                const o = overlays.find((ov) => ov.id === id);
+                // Seek to the overlay's mid-point so the user lands past the
+                // fade-in (otherwise the overlay is invisible at startSeconds).
+                if (o) seekToOverlayMid(o);
+              }
             }}
             onSetTrim={setTrim}
             onTargetSecondsChange={setTargetSeconds}
@@ -943,28 +1150,77 @@ function formatTimecode(seconds: number): string {
 type OverlayDragLayerProps = {
   overlays: Overlay[];
   selectedOverlayId: string | null;
+  editingOverlayId: string | null;
   currentFrame: number;
   fps: number;
   onSelect: (id: string | null) => void;
   onChange: (id: string, patch: Partial<Overlay>) => void;
+  onBeginEdit: (id: string) => void;
+  onEndEdit: () => void;
 };
+
+type DragMode =
+  | "move"
+  | "resize-nw"
+  | "resize-n"
+  | "resize-ne"
+  | "resize-w"
+  | "resize-e"
+  | "resize-sw"
+  | "resize-s"
+  | "resize-se";
+
+type HandlePos = Exclude<DragMode, "move"> extends `resize-${infer P}`
+  ? P
+  : never;
+
+const HANDLE_POSITIONS: HandlePos[] = [
+  "nw",
+  "n",
+  "ne",
+  "w",
+  "e",
+  "sw",
+  "s",
+  "se",
+];
+
+function signsForMode(mode: DragMode): { x: -1 | 0 | 1; y: -1 | 0 | 1 } {
+  switch (mode) {
+    case "resize-nw": return { x: -1, y: -1 };
+    case "resize-n":  return { x: 0,  y: -1 };
+    case "resize-ne": return { x: 1,  y: -1 };
+    case "resize-w":  return { x: -1, y: 0 };
+    case "resize-e":  return { x: 1,  y: 0 };
+    case "resize-sw": return { x: -1, y: 1 };
+    case "resize-s":  return { x: 0,  y: 1 };
+    case "resize-se": return { x: 1,  y: 1 };
+    default:          return { x: 0,  y: 0 };
+  }
+}
 
 function OverlayDragLayer({
   overlays,
   selectedOverlayId,
+  editingOverlayId,
   currentFrame,
   fps,
   onSelect,
   onChange,
+  onBeginEdit,
+  onEndEdit,
 }: OverlayDragLayerProps) {
   const layerRef = useRef<HTMLDivElement>(null);
-  const [editingId, setEditingId] = useState<string | null>(null);
   const dragRef = useRef<{
     id: string;
+    kind: Overlay["kind"];
+    mode: DragMode;
     pointerStartX: number;
     pointerStartY: number;
     initialX: number;
     initialY: number;
+    initialWidth: number;
+    initialFontSize: number;
     rectW: number;
     rectH: number;
   } | null>(null);
@@ -974,16 +1230,16 @@ function OverlayDragLayer({
     (o) => seconds >= o.startSeconds && seconds < o.startSeconds + o.durationSeconds,
   );
 
-  // Derive the effective editing target. If the overlay being edited is no
-  // longer visible at this frame (e.g., user scrubbed past its window) the
-  // editor disappears automatically — no setState during render needed.
   const effectiveEditingId =
-    editingId && visible.some((o) => o.id === editingId) ? editingId : null;
+    editingOverlayId && visible.some((o) => o.id === editingOverlayId)
+      ? editingOverlayId
+      : null;
 
   if (visible.length === 0) return null;
 
   const beginDrag = (
     overlay: Overlay,
+    mode: DragMode,
     e: React.PointerEvent<HTMLDivElement>,
   ) => {
     e.stopPropagation();
@@ -992,10 +1248,14 @@ function OverlayDragLayer({
     (e.target as Element).setPointerCapture(e.pointerId);
     dragRef.current = {
       id: overlay.id,
+      kind: overlay.kind,
+      mode,
       pointerStartX: e.clientX,
       pointerStartY: e.clientY,
       initialX: overlay.x,
       initialY: overlay.y,
+      initialWidth: overlay.widthFraction ?? 0.7,
+      initialFontSize: overlay.fontSize,
       rectW: rect.width,
       rectH: rect.height,
     };
@@ -1005,11 +1265,50 @@ function OverlayDragLayer({
   const handleMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag) return;
-    const dx = (e.clientX - drag.pointerStartX) / drag.rectW;
-    const dy = (e.clientY - drag.pointerStartY) / drag.rectH;
-    const nextX = Math.max(0, Math.min(1, drag.initialX + dx));
-    const nextY = Math.max(0, Math.min(1, drag.initialY + dy));
-    onChange(drag.id, { x: nextX, y: nextY });
+    const dxFraction = (e.clientX - drag.pointerStartX) / drag.rectW;
+    const dyFraction = (e.clientY - drag.pointerStartY) / drag.rectH;
+
+    if (drag.mode === "move") {
+      onChange(drag.id, {
+        x: Math.max(0, Math.min(1, drag.initialX + dxFraction)),
+        y: Math.max(0, Math.min(1, drag.initialY + dyFraction)),
+      });
+      return;
+    }
+
+    // Word-style resize: horizontal handles change widthFraction (text wrap);
+    // vertical handles change fontSize (text height). Corner handles do both.
+    // Width keeps the opposite edge anchored (re-centers x by half the delta);
+    // fontSize keeps the center y fixed — text grows symmetrically about its
+    // anchor point.
+    const { x: signX, y: signY } = signsForMode(drag.mode);
+    const patch: Partial<Overlay> = {};
+    if (signX !== 0) {
+      const nextWidth = Math.max(
+        0.08,
+        Math.min(1, drag.initialWidth + signX * dxFraction),
+      );
+      const widthDelta = nextWidth - drag.initialWidth;
+      patch.widthFraction = nextWidth;
+      patch.x = Math.max(
+        0,
+        Math.min(1, drag.initialX + (signX * widthDelta) / 2),
+      );
+    }
+    if (signY !== 0) {
+      // Composition height is 1920 px; dyFraction is fraction of rect height.
+      // So fontSize delta in composition px = signY × dyFraction × 1920. Cap
+      // matches the right-panel Size slider (240 text / 360 sticker) so the
+      // slider always reflects what dragging produced.
+      const fontDelta = signY * dyFraction * 1920;
+      const maxFont = drag.kind === "text" ? 240 : 360;
+      const nextFont = Math.max(
+        24,
+        Math.min(maxFont, drag.initialFontSize + fontDelta),
+      );
+      patch.fontSize = nextFont;
+    }
+    onChange(drag.id, patch);
   };
 
   const endDrag = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -1034,43 +1333,123 @@ function OverlayDragLayer({
             <InlineTextEditor
               key={overlay.id}
               onChange={(value) => onChange(overlay.id, { content: value })}
-              onExit={() => setEditingId(null)}
+              onExit={onEndEdit}
               overlay={overlay}
             />
           );
         }
         return (
-          <div
-            className={`pointer-events-auto absolute h-14 w-14 -translate-x-1/2 -translate-y-1/2 cursor-move rounded-md border-2 transition ${
-              isSelected
-                ? "border-[var(--accent)] bg-[var(--accent)]/15"
-                : "border-white/70 bg-white/10 hover:border-white"
-            }`}
-            data-overlay-handle
-            data-overlay-id={overlay.id}
+          <OverlayBoxHandle
+            isSelected={isSelected}
             key={overlay.id}
-            onDoubleClick={(e) => {
+            onBeginDrag={(mode, e) => beginDrag(overlay, mode, e)}
+            onDoubleClick={() => {
               if (overlay.kind !== "text") return;
-              e.stopPropagation();
-              onSelect(overlay.id);
-              setEditingId(overlay.id);
+              onBeginEdit(overlay.id);
             }}
-            onPointerDown={(e) => beginDrag(overlay, e)}
             onPointerMove={handleMove}
             onPointerUp={endDrag}
-            style={{
-              left: `${overlay.x * 100}%`,
-              top: `${overlay.y * 100}%`,
-            }}
-            title={
-              overlay.kind === "text"
-                ? "Drag to reposition · double-click to edit"
-                : "Drag to reposition"
-            }
+            overlay={overlay}
           />
         );
       })}
     </div>
+  );
+}
+
+function OverlayBoxHandle({
+  overlay,
+  isSelected,
+  onBeginDrag,
+  onPointerMove,
+  onPointerUp,
+  onDoubleClick,
+}: {
+  overlay: Overlay;
+  isSelected: boolean;
+  onBeginDrag: (mode: DragMode, e: React.PointerEvent<HTMLDivElement>) => void;
+  onPointerMove: (e: React.PointerEvent<HTMLDivElement>) => void;
+  onPointerUp: (e: React.PointerEvent<HTMLDivElement>) => void;
+  onDoubleClick: () => void;
+}) {
+  const widthFraction = overlay.widthFraction ?? 0.7;
+  const isText = overlay.kind === "text";
+  // Snap the click target close to the rendered text size. Composition height
+  // is 1920 px, so a fontSize-px line height maps to (fontSize × 1.15 / 1920)
+  // × 100 of the drag layer's height. Single-line estimate — multi-line text
+  // is undersized but still clickable per line.
+  const heightCqh = (overlay.fontSize * 1.15) / 1920 * 100;
+  return (
+    <div
+      className={`pointer-events-auto absolute -translate-x-1/2 -translate-y-1/2 rounded-sm border-2 transition ${
+        isSelected ? "border-[var(--accent)]" : "border-transparent"
+      }`}
+      data-overlay-handle
+      data-overlay-id={overlay.id}
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        onDoubleClick();
+      }}
+      onPointerDown={(e) => onBeginDrag("move", e)}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      style={{
+        left: `${overlay.x * 100}%`,
+        top: `${overlay.y * 100}%`,
+        width: `${widthFraction * 100}%`,
+        height: `${heightCqh}cqh`,
+        minHeight: 24,
+        cursor: "move",
+      }}
+      title={
+        isText
+          ? "Drag to move · double-click to edit · drag handles to resize"
+          : "Drag to move · drag handles to resize"
+      }
+    >
+      {isSelected
+        ? HANDLE_POSITIONS.map((pos) => (
+            <ResizeHandle key={pos} onBeginDrag={onBeginDrag} position={pos} />
+          ))
+        : null}
+    </div>
+  );
+}
+
+const HANDLE_LAYOUT: Record<
+  HandlePos,
+  { style: React.CSSProperties; cursor: string }
+> = {
+  nw: { style: { left: -6, top: -6 }, cursor: "nwse-resize" },
+  n:  { style: { left: "50%", top: -6, transform: "translateX(-50%)" }, cursor: "ns-resize" },
+  ne: { style: { right: -6, top: -6 }, cursor: "nesw-resize" },
+  w:  { style: { left: -6, top: "50%", transform: "translateY(-50%)" }, cursor: "ew-resize" },
+  e:  { style: { right: -6, top: "50%", transform: "translateY(-50%)" }, cursor: "ew-resize" },
+  sw: { style: { left: -6, bottom: -6 }, cursor: "nesw-resize" },
+  s:  { style: { left: "50%", bottom: -6, transform: "translateX(-50%)" }, cursor: "ns-resize" },
+  se: { style: { right: -6, bottom: -6 }, cursor: "nwse-resize" },
+};
+
+function ResizeHandle({
+  position,
+  onBeginDrag,
+}: {
+  position: HandlePos;
+  onBeginDrag: (mode: DragMode, e: React.PointerEvent<HTMLDivElement>) => void;
+}) {
+  const { style, cursor } = HANDLE_LAYOUT[position];
+  return (
+    <div
+      aria-hidden
+      className="absolute h-3 w-3 rounded-sm border border-white bg-[var(--accent)]"
+      data-overlay-resize-handle
+      data-position={position}
+      onPointerDown={(e) => {
+        e.stopPropagation();
+        onBeginDrag(`resize-${position}`, e);
+      }}
+      style={{ ...style, cursor }}
+    />
   );
 }
 
@@ -1094,6 +1473,7 @@ function InlineTextEditor({
   // so an overlay fontSize of N px corresponds to (N / 1080 * 100) cqw in
   // the drag layer (which always matches the player aspect-ratio).
   const fontSizeCqw = (overlay.fontSize / 1080) * 100;
+  const widthFraction = overlay.widthFraction ?? 0.7;
   return (
     <textarea
       className="pointer-events-auto absolute -translate-x-1/2 -translate-y-1/2 resize-none border-2 border-[var(--accent)] bg-transparent text-center outline-none"
@@ -1118,11 +1498,13 @@ function InlineTextEditor({
         fontWeight: 700,
         color: overlay.color ?? "#ffffff",
         fontSize: `${fontSizeCqw}cqw`,
-        lineHeight: 1.1,
+        lineHeight: 1.15,
         textShadow: "0 4px 32px rgba(0,0,0,0.55)",
-        width: "70%",
+        width: `${widthFraction * 100}%`,
         caretColor: "var(--accent)",
         whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        padding: 0,
       }}
       value={overlay.content}
     />
@@ -1198,6 +1580,7 @@ const NAV_ITEMS: { id: NavSection; label: string; icon: string }[] = [
   { id: "media", label: "Media", icon: "▦" },
   { id: "audio", label: "Audio", icon: "♪" },
   { id: "text", label: "Text", icon: "T" },
+  { id: "stickers", label: "Stickers", icon: "☆" },
   { id: "captions", label: "Captions", icon: "❝" },
   { id: "effects", label: "Effects", icon: "✶" },
   { id: "transitions", label: "Transitions", icon: "⇆" },
@@ -1512,15 +1895,19 @@ function DashboardPanel({
 type MediaPanelProps = {
   aiMessage: string;
   aiStatus: "idle" | "running" | "ok" | "error";
+  audioUploading: boolean;
   beatGrid: BeatGrid | null;
   beatStatus: "idle" | "running" | "ok" | "error";
+  customTracks: MusicTrack[];
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   isDragging: boolean;
   isUploading: boolean;
   library: TimelineMedia[];
   onAddText: () => void;
-  onAddEmoji: (emoji: string) => void;
+  onAddSticker: (glyph: string) => void;
+  onAudioFiles: (files: FileList | null) => void | Promise<void>;
   onFiles: (files: FileList | null) => void | Promise<void>;
+  onRemoveCustomTrack: (track: MusicTrack) => void | Promise<void>;
   onRemoveLibrary: (id: string) => void;
   onRunAi: () => void | Promise<void>;
   onSelectTrack: (t: MusicTrack) => void;
@@ -1535,15 +1922,19 @@ function MediaPanel(props: MediaPanelProps) {
   const {
     aiMessage,
     aiStatus,
+    audioUploading,
     beatGrid,
     beatStatus,
+    customTracks,
     fileInputRef,
     isDragging,
     isUploading,
     library,
     onAddText,
-    onAddEmoji,
+    onAddSticker,
+    onAudioFiles,
     onFiles,
+    onRemoveCustomTrack,
     onRemoveLibrary,
     onRunAi,
     onSelectTrack,
@@ -1553,6 +1944,7 @@ function MediaPanel(props: MediaPanelProps) {
     statusMessage,
     timelineLength,
   } = props;
+  const audioInputRef = useRef<HTMLInputElement>(null);
 
   return (
     <aside className="flex w-[300px] shrink-0 flex-col border-r border-[var(--line)] bg-[var(--panel)]">
@@ -1621,6 +2013,79 @@ function MediaPanel(props: MediaPanelProps) {
 
         {section === "audio" ? (
           <>
+            <div className="mb-3 flex items-center justify-between">
+              <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">
+                Your tracks
+              </span>
+              <button
+                className="rounded-md bg-[var(--accent)] px-2.5 py-1 text-[11px] font-medium text-white transition hover:bg-[var(--accent-strong)] disabled:opacity-50"
+                disabled={audioUploading}
+                onClick={() => audioInputRef.current?.click()}
+                type="button"
+              >
+                {audioUploading ? "Uploading…" : "+ Upload"}
+              </button>
+            </div>
+            <input
+              accept="audio/mpeg,audio/mp4,audio/wav,audio/x-wav,audio/aac,audio/ogg,audio/flac,audio/webm,.mp3,.wav,.m4a,.aac,.ogg,.flac,.webm"
+              className="sr-only"
+              multiple
+              onChange={(e) => {
+                void onAudioFiles(e.target.files);
+                e.target.value = "";
+              }}
+              ref={audioInputRef}
+              type="file"
+            />
+            {customTracks.length > 0 ? (
+              <div className="mb-3 grid gap-1.5">
+                {customTracks.map((track) => {
+                  const active = track.id === selectedTrack.id;
+                  return (
+                    <div
+                      className={`group flex items-center gap-2 rounded-lg border px-3 py-2 text-xs transition ${
+                        active
+                          ? "border-[var(--accent)] bg-[var(--accent-soft)]"
+                          : "border-[var(--line)] bg-[var(--panel-soft)] hover:border-[var(--line-strong)]"
+                      }`}
+                      key={track.id}
+                    >
+                      <button
+                        className="flex-1 text-left"
+                        onClick={() => onSelectTrack(track)}
+                        type="button"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="truncate font-semibold" title={track.name}>
+                            {track.name}
+                          </span>
+                          <span className="shrink-0 text-[10px] text-[var(--muted)]">
+                            {track.durationLabel}
+                          </span>
+                        </div>
+                      </button>
+                      <button
+                        aria-label={`Remove ${track.name}`}
+                        className="rounded p-1 text-[var(--muted)] opacity-0 transition hover:bg-rose-50 hover:text-rose-600 group-hover:opacity-100"
+                        onClick={() => void onRemoveCustomTrack(track)}
+                        type="button"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="mb-3 text-[11px] leading-4 text-[var(--muted)]">
+                Upload mp3, wav, m4a, aac, ogg, or flac. They&apos;re scoped to
+                this project.
+              </p>
+            )}
+
+            <div className="mb-1 text-[10px] uppercase tracking-wider text-[var(--muted)]">
+              Built-in
+            </div>
             <div className="grid gap-1.5">
               {MUSIC_LIBRARY.map((track) => {
                 const active = track.id === selectedTrack.id;
@@ -1678,14 +2143,17 @@ function MediaPanel(props: MediaPanelProps) {
           </div>
         ) : null}
 
-        {section === "text" ? (
-          <TextPanelContent onAddEmoji={onAddEmoji} onAddText={onAddText} />
+        {section === "text" ? <TextPanelContent onAddText={onAddText} /> : null}
+
+        {section === "stickers" ? (
+          <StickerPanelContent onAddSticker={onAddSticker} />
         ) : null}
 
         {section !== "media" &&
         section !== "audio" &&
         section !== "captions" &&
-        section !== "text" ? (
+        section !== "text" &&
+        section !== "stickers" ? (
           <div className="rounded-lg border border-dashed border-[var(--line-strong)] bg-[var(--panel-soft)] p-6 text-center text-xs leading-5 text-[var(--muted)]">
             {section.charAt(0).toUpperCase() + section.slice(1)} coming soon.
           </div>
@@ -1695,13 +2163,7 @@ function MediaPanel(props: MediaPanelProps) {
   );
 }
 
-function TextPanelContent({
-  onAddText,
-  onAddEmoji,
-}: {
-  onAddText: () => void;
-  onAddEmoji: (emoji: string) => void;
-}) {
+function TextPanelContent({ onAddText }: { onAddText: () => void }) {
   return (
     <div className="grid gap-3">
       <button
@@ -1713,27 +2175,43 @@ function TextPanelContent({
       </button>
       <p className="text-[11px] leading-4 text-[var(--muted)]">
         Text is added at the playhead for 2s. Drag the bar on the timeline to
-        change start and duration, or edit the selected overlay in the right
-        panel.
+        change start and duration, edit content in the right panel, or
+        double-click in the preview to edit inline. Use the emoji picker in
+        the right panel to insert emoji into the text.
       </p>
+    </div>
+  );
+}
 
-      <div className="mt-1 grid gap-2">
-        <div className="text-[10px] uppercase tracking-wider text-[var(--muted)]">
-          Emoji
-        </div>
-        <div className="grid grid-cols-4 gap-1.5" data-emoji-palette>
-          {EMOJI_PALETTE.map((emoji) => (
-            <button
-              aria-label={`Add ${emoji} overlay`}
-              className="flex h-12 items-center justify-center rounded-md border border-[var(--line)] bg-[var(--panel-soft)] text-2xl transition hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]"
-              key={emoji}
-              onClick={() => onAddEmoji(emoji)}
-              type="button"
-            >
-              {emoji}
-            </button>
-          ))}
-        </div>
+function StickerPanelContent({
+  onAddSticker,
+}: {
+  onAddSticker: (glyph: string) => void;
+}) {
+  return (
+    <div className="grid gap-3">
+      <p className="text-[11px] leading-4 text-[var(--muted)]">
+        Tap a sticker to drop it at the playhead. Drag in the preview to
+        reposition, or grab any handle to resize — like a WhatsApp sticker.
+      </p>
+      <div className="grid grid-cols-3 gap-2" data-sticker-palette>
+        {STICKER_PALETTE.map((glyph) => (
+          <button
+            aria-label={`Add ${glyph} sticker`}
+            className="group flex aspect-square items-center justify-center rounded-2xl border border-[var(--line)] bg-[var(--panel-soft)] p-2 transition hover:-translate-y-0.5 hover:border-[var(--accent)] hover:bg-[var(--accent-soft)] hover:shadow-md"
+            key={glyph}
+            onClick={() => onAddSticker(glyph)}
+            type="button"
+          >
+            <img
+              alt={`${glyph} sticker`}
+              className="h-full w-full transition group-hover:scale-105"
+              draggable={false}
+              src={twemojiUrlFor(glyph)}
+              style={{ filter: "drop-shadow(0 2px 4px rgba(0,0,0,0.2))" }}
+            />
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -1845,6 +2323,37 @@ function OverlayRightPanel({
 }: OverlayRightPanelProps) {
   const isText = overlay.kind === "text";
   const endSeconds = overlay.startSeconds + overlay.durationSeconds;
+
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Selection state lags React renders — remember it as a ref so an emoji
+  // click after blur still inserts at the right spot.
+  const lastSelectionRef = useRef<{ start: number; end: number } | null>(null);
+  function rememberSelection() {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    lastSelectionRef.current = {
+      start: ta.selectionStart ?? ta.value.length,
+      end: ta.selectionEnd ?? ta.value.length,
+    };
+  }
+  function insertEmoji(glyph: string) {
+    const sel = lastSelectionRef.current ?? {
+      start: overlay.content.length,
+      end: overlay.content.length,
+    };
+    const before = overlay.content.slice(0, sel.start);
+    const after = overlay.content.slice(sel.end);
+    const next = before + glyph + after;
+    const cursor = sel.start + glyph.length;
+    onChange({ content: next });
+    lastSelectionRef.current = { start: cursor, end: cursor };
+    requestAnimationFrame(() => {
+      const ta = textareaRef.current;
+      if (!ta) return;
+      ta.focus();
+      ta.setSelectionRange(cursor, cursor);
+    });
+  }
   return (
     <aside
       data-right-panel
@@ -1852,7 +2361,7 @@ function OverlayRightPanel({
     >
       <div className="flex shrink-0 items-center justify-between border-b border-[var(--line)] px-4 py-3">
         <h2 className="truncate text-sm font-medium text-[var(--ink-soft)]">
-          {isText ? "Text overlay" : "Emoji overlay"}
+          {isText ? "Text overlay" : "Sticker overlay"}
         </h2>
         <button
           aria-label="Close panel"
@@ -1883,25 +2392,90 @@ function OverlayRightPanel({
 
         <label className="grid gap-1">
           <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">
-            {isText ? "Text" : "Emoji"}
+            {isText ? "Text" : "Sticker"}
           </span>
           {isText ? (
             <textarea
               className="min-h-[64px] rounded-md border border-[var(--line)] bg-[var(--panel-soft)] px-2 py-1.5 text-xs focus:border-[var(--accent)] focus:outline-none"
+              onBlur={rememberSelection}
+              onClick={rememberSelection}
               onChange={(e) => onChange({ content: e.target.value })}
+              onKeyUp={rememberSelection}
+              onSelect={rememberSelection}
               placeholder="Your text here"
+              ref={textareaRef}
               value={overlay.content}
             />
           ) : (
-            <input
-              className="rounded-md border border-[var(--line)] bg-[var(--panel-soft)] px-2 py-1.5 text-center text-xl focus:border-[var(--accent)] focus:outline-none"
-              onChange={(e) => onChange({ content: e.target.value })}
-              maxLength={4}
-              type="text"
-              value={overlay.content}
-            />
+            <div className="flex items-center justify-center rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3">
+              <img
+                alt={`${overlay.content} sticker`}
+                className="h-16 w-16"
+                draggable={false}
+                src={twemojiUrlFor(overlay.content)}
+                style={{ filter: "drop-shadow(0 2px 4px rgba(0,0,0,0.2))" }}
+              />
+            </div>
           )}
         </label>
+
+        {!isText ? (
+          <div className="grid gap-1">
+            <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">
+              Swap sticker
+            </span>
+            <div className="grid grid-cols-4 gap-1.5">
+              {EMOJI_PALETTE.map((glyph) => {
+                const active = glyph === overlay.content;
+                return (
+                  <button
+                    aria-label={`Swap to ${glyph}`}
+                    aria-pressed={active}
+                    className={`flex aspect-square items-center justify-center rounded-lg border p-1 transition ${
+                      active
+                        ? "border-[var(--accent)] bg-[var(--accent-soft)]"
+                        : "border-[var(--line)] bg-[var(--panel-soft)] hover:border-[var(--accent)]"
+                    }`}
+                    key={glyph}
+                    onClick={() => onChange({ content: glyph })}
+                    type="button"
+                  >
+                    <img
+                      alt=""
+                      className="h-full w-full"
+                      draggable={false}
+                      src={twemojiUrlFor(glyph)}
+                    />
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        ) : null}
+
+        {isText ? (
+          <div className="grid gap-1">
+            <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">
+              Emoji
+            </span>
+            <div className="grid grid-cols-8 gap-1" data-emoji-picker>
+              {EMOJI_PALETTE.map((glyph) => (
+                <button
+                  aria-label={`Insert ${glyph}`}
+                  className="flex h-7 items-center justify-center rounded border border-[var(--line)] bg-[var(--panel-soft)] text-base transition hover:border-[var(--accent)] hover:bg-[var(--accent-soft)]"
+                  key={glyph}
+                  onClick={() => insertEmoji(glyph)}
+                  type="button"
+                >
+                  {glyph}
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-[var(--muted)]">
+              Inserts at cursor (or end of text).
+            </p>
+          </div>
+        ) : null}
 
         <label className="grid gap-1">
           <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">
