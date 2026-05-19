@@ -115,9 +115,9 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
   );
   const effectiveNavSection: NavSection = projectId ? navSection : "dashboard";
 
-  // Preview canvas zoom + pan state. "fit" computes to scale 1 with the
-  // current aspect-ratio layout (the inner already contains the video within
-  // the wrapper). 0.5/1/2 = explicit %.
+  // Preview canvas zoom + pan state. "fit" computes a dynamic scale from a
+  // ResizeObserver on the canvas wrapper so the video always floats inside
+  // with ~20px padding. 0.5/1/2 = explicit %.
   type PreviewZoom = "fit" | 0.5 | 1 | 2;
   const [previewZoom, setPreviewZoom] = useState<PreviewZoom>("fit");
   const [previewPan, setPreviewPan] = useState({ x: 0, y: 0 });
@@ -128,7 +128,35 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
     initialPanX: number;
     initialPanY: number;
   } | null>(null);
-  const effectiveZoom = previewZoom === "fit" ? 1 : previewZoom;
+  const canvasWrapperRef = useRef<HTMLDivElement | null>(null);
+  const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = canvasWrapperRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const cr = entry.contentRect;
+      setCanvasSize({ w: cr.width, h: cr.height });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  // Composition is 1080×1920 (9:16). At "natural" zoom the inner div is
+  // h = canvas.h, w = canvas.h × 9/16. To make the whole video fit inside the
+  // canvas with 20px padding, shrink by whichever axis is tighter.
+  const fitScale = useMemo(() => {
+    const { w, h } = canvasSize;
+    if (w <= 0 || h <= 0) return 1;
+    const padding = 20;
+    const availW = Math.max(0, w - padding * 2);
+    const availH = Math.max(0, h - padding * 2);
+    const naturalH = h;
+    const naturalW = h * (9 / 16);
+    if (naturalH === 0 || naturalW === 0) return 1;
+    return Math.min(availH / naturalH, availW / naturalW);
+  }, [canvasSize]);
+  const effectiveZoom = previewZoom === "fit" ? fitScale : previewZoom;
   function setZoomAndRecenter(next: PreviewZoom) {
     setPreviewZoom(next);
     setPreviewPan({ x: 0, y: 0 });
@@ -962,7 +990,7 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
 
   return (
     <main
-      className="relative flex h-screen w-full flex-col overflow-hidden bg-[var(--bg)] text-[var(--ink)] sm:flex-row"
+      className="relative flex h-screen w-screen flex-col overflow-hidden bg-[var(--bg)] text-[var(--ink)] sm:flex-row"
       onClick={handleMainClick}
     >
       <div className="pointer-events-auto absolute right-3 top-3 z-50 flex items-center gap-3">
@@ -1027,18 +1055,19 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
       {/* Right panel: strict flex column with vertical overflow handling.
           When the viewport is shorter than (preview min + toolbar + timeline),
           the wrapper scrolls instead of pushing the timeline off-screen. */}
-      <section className="flex w-full min-h-0 flex-1 flex-col gap-2 overflow-y-auto bg-[var(--bg-soft)] px-3 py-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--line-strong)] [&::-webkit-scrollbar]:w-2">
+      <section className="flex w-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-y-auto bg-[var(--bg-soft)] px-3 py-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--line-strong)] [&::-webkit-scrollbar]:w-2">
         {/* Video preview — flex-grow:1 with a tight min so the timeline below
             always fits. Acts as a bounded viewport (overflow-hidden) for an
             inner zoom/pan-able canvas. Cursor reflects grab/grabbing state. */}
         <div
-          className={`relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-2 ${
+          className={`relative flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-2 ${
             isPanning ? "cursor-grabbing" : "cursor-grab"
           }`}
           onPointerCancel={endPan}
           onPointerDown={startPan}
           onPointerMove={movePan}
           onPointerUp={endPan}
+          ref={canvasWrapperRef}
         >
           <div
             className="relative h-full max-w-full overflow-hidden rounded-xl bg-[var(--panel-strong)]"
