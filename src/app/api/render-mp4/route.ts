@@ -87,30 +87,40 @@ export async function POST(req: Request) {
     const filename = `montaj-reel-${timestamp}.mp4`;
 
     if (serviceKey) {
-      const supabase = createClient(
-        process.env.NEXT_PUBLIC_SUPABASE_URL!,
-        serviceKey,
-        { auth: { persistSession: false } },
-      );
-      const storagePath = `${userId}/exports/${filename}`;
-      const fileBuffer = await fs.readFile(outputPath);
-      const { error: uploadError } = await supabase.storage
-        .from("montaj-media")
-        .upload(storagePath, fileBuffer, {
-          contentType: "video/mp4",
-          upsert: false,
-        });
-      await fs.unlink(outputPath).catch(() => {});
-      if (!uploadError) {
-        const { data: signed } = await supabase.storage
+      try {
+        const supabase = createClient(
+          process.env.NEXT_PUBLIC_SUPABASE_URL!,
+          serviceKey,
+          { auth: { persistSession: false } },
+        );
+        const storagePath = `${userId}/exports/${filename}`;
+        const fileBuffer = await fs.readFile(outputPath);
+        const { error: uploadError } = await supabase.storage
           .from("montaj-media")
-          .createSignedUrl(storagePath, 3600, { download: filename });
-        if (signed?.signedUrl) {
-          return new Response(
-            JSON.stringify({ downloadUrl: signed.signedUrl, filename }),
-            { headers: { "Content-Type": "application/json" } },
-          );
+          .upload(storagePath, fileBuffer, {
+            contentType: "video/mp4",
+            upsert: false,
+          });
+        if (uploadError) {
+          console.error("[render-mp4] upload error:", uploadError);
+          // Fall through to streaming; keep the temp file alive for that path.
+        } else {
+          const { data: signed, error: signError } = await supabase.storage
+            .from("montaj-media")
+            .createSignedUrl(storagePath, 3600, { download: filename });
+          if (signError) {
+            console.error("[render-mp4] sign error:", signError);
+          }
+          if (signed?.signedUrl) {
+            await fs.unlink(outputPath).catch(() => {});
+            return new Response(
+              JSON.stringify({ downloadUrl: signed.signedUrl, filename }),
+              { headers: { "Content-Type": "application/json" } },
+            );
+          }
         }
+      } catch (e) {
+        console.error("[render-mp4] supabase upload failed, will stream:", e);
       }
     }
 
