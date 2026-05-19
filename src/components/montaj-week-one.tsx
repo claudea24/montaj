@@ -33,8 +33,6 @@ import {
   type ProjectSummary,
 } from "@/lib/projects";
 import { detectBeats, type BeatGrid } from "@/lib/beats";
-import { imageSrcToDataUrl } from "@/lib/photo-thumb";
-import type { AnalysisResult } from "@/lib/ai";
 import {
   createStickerOverlay,
   createTextOverlay,
@@ -46,10 +44,6 @@ import {
   type Overlay,
   type OverlayAnimation,
 } from "@/lib/overlays";
-import {
-  TRANSITION_STYLES,
-  type TransitionStyle,
-} from "@/components/slideshow-composition";
 import { OVERLAY_FONTS, type OverlayFontId } from "@/lib/fonts";
 
 const FPS = 30;
@@ -79,8 +73,6 @@ type NavSection =
   | "audio"
   | "text"
   | "stickers"
-  | "captions"
-  | "transitions"
   | "export";
 
 type MontajWeekOneProps = {
@@ -237,12 +229,6 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
     beatStatusByTrack[selectedTrack.src] ?? "idle";
 
   const [targetSeconds, setTargetSeconds] = useState(DEFAULT_TARGET_SECONDS);
-  const [transitionStyle, setTransitionStyle] = useState<TransitionStyle>("cycle");
-
-  const [aiStatus, setAiStatus] = useState<"idle" | "running" | "ok" | "error">("idle");
-  const [aiMessage, setAiMessage] = useState<string>(
-    "Auto-pick will score each photo, suggest captions, and order them into a story arc.",
-  );
 
   const playerRef = useRef<PlayerRef>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -353,18 +339,11 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
           setTargetSeconds(doc.targetSeconds ?? DEFAULT_TARGET_SECONDS);
           const migratedOverlays = (doc.overlays ?? []).map(migrateLoadedOverlay);
           setOverlays(migratedOverlays);
-          const loadedTransition: TransitionStyle = (
-            TRANSITION_STYLES as readonly string[]
-          ).includes(doc.transitionStyle ?? "")
-            ? (doc.transitionStyle as TransitionStyle)
-            : "cycle";
-          setTransitionStyle(loadedTransition);
           loadedDoc = {
             timeline: resolvedTimeline,
             selectedTrackId: doc.selectedTrackId ?? MUSIC_LIBRARY[0].id,
             targetSeconds: doc.targetSeconds ?? DEFAULT_TARGET_SECONDS,
             overlays: migratedOverlays,
-            transitionStyle: loadedTransition,
           };
         }
         // Mark loaded for both branches (project with document, and a fresh
@@ -453,7 +432,7 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
   useEffect(() => {
     if (!projectLoaded) return;
     dirtyRef.current = true;
-  }, [timeline, selectedTrack, targetSeconds, overlays, transitionStyle, projectLoaded]);
+  }, [timeline, selectedTrack, targetSeconds, overlays, projectLoaded]);
 
   // 15s autosave loop. Skips when nothing has changed.
   useEffect(() => {
@@ -465,7 +444,6 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
         selectedTrackId: selectedTrack.id,
         targetSeconds,
         overlays,
-        transitionStyle,
       };
       const snapshot = JSON.stringify(doc);
       // Compare against the last known-on-disk snapshot. If the in-memory
@@ -495,7 +473,7 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
       }
     }, AUTOSAVE_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [supabase, projectId, projectLoaded, timeline, selectedTrack, targetSeconds, overlays, transitionStyle]);
+  }, [supabase, projectId, projectLoaded, timeline, selectedTrack, targetSeconds, overlays]);
 
   const togglePlay = useCallback(() => {
     const p = playerRef.current;
@@ -638,10 +616,9 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
     fallbackSecondsPerImage: FALLBACK_SECONDS_PER_IMAGE,
     captions: timeline.length > 0 ? captions : undefined,
     transitionFrames: TRANSITION_FRAMES,
-    transitionStyle,
     overlays,
     editingOverlayId,
-  }), [timeline, selectedTrack.src, selectedTrack.durationSeconds, perSlotFrames, perSlotStartFrames, captions, overlays, editingOverlayId, transitionStyle]);
+  }), [timeline, selectedTrack.src, selectedTrack.durationSeconds, perSlotFrames, perSlotStartFrames, captions, overlays, editingOverlayId]);
   function removeItem(id: string) {
     setTimeline((current) => {
       const removed = current.find((it) => it.id === id);
@@ -655,6 +632,13 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
   function setCaption(id: string, text: string) {
     setTimeline((current) =>
       current.map((it) => (it.id === id ? { ...it, caption: text } : it)),
+    );
+  }
+
+  function setClipPlaybackRate(id: string, value: number) {
+    const clamped = Math.max(0.25, Math.min(4, value));
+    setTimeline((current) =>
+      current.map((it) => (it.id === id ? { ...it, playbackRate: clamped } : it)),
     );
   }
 
@@ -993,68 +977,6 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
     [overlays, selectedOverlayId],
   );
 
-  async function runAIAnalysis() {
-    const photos = timeline.filter((it) => it.kind === "image");
-    if (photos.length === 0) {
-      setAiStatus("error");
-      setAiMessage("Add some photos first.");
-      return;
-    }
-
-    setAiStatus("running");
-    setAiMessage(`Analyzing ${photos.length} photo${photos.length === 1 ? "" : "s"}...`);
-
-    try {
-      const dataUrls = await Promise.all(
-        photos.map(async (p) => ({ id: p.id, name: p.name, dataUrl: await imageSrcToDataUrl(p.src) })),
-      );
-      const usable = dataUrls.filter(
-        (d): d is { id: string; name: string; dataUrl: string } => Boolean(d.dataUrl),
-      );
-
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ photos: usable, maxPicks: 12 }),
-      });
-      if (!response.ok) throw new Error(`API ${response.status}`);
-
-      const result = (await response.json()) as AnalysisResult;
-      const itemById = new Map(result.items.map((it) => [it.id, it]));
-
-      setTimeline((current) => {
-        const enriched = current.map((it) => {
-          const meta = itemById.get(it.id);
-          if (!meta) return it;
-          return {
-            ...it,
-            caption: it.caption ?? meta.caption,
-            scene: meta.scene,
-            qualityScore: meta.qualityScore,
-          };
-        });
-
-        if (result.orderedIds.length === 0) return enriched;
-        const orderIndex = new Map(result.orderedIds.map((id, i) => [id, i]));
-        return [...enriched].sort((a, b) => {
-          const ai = orderIndex.has(a.id) ? orderIndex.get(a.id)! : Number.POSITIVE_INFINITY;
-          const bi = orderIndex.has(b.id) ? orderIndex.get(b.id)! : Number.POSITIVE_INFINITY;
-          return ai - bi;
-        });
-      });
-
-      setAiStatus("ok");
-      setAiMessage(
-        result.source === "claude"
-          ? `Claude Code ranked ${result.items.length} photos and arranged ${result.orderedIds.length} into a narrative.`
-          : (result.reason ?? "Heuristic ordering applied."),
-      );
-    } catch (error) {
-      setAiStatus("error");
-      setAiMessage(error instanceof Error ? error.message : "Analysis failed.");
-    }
-  }
-
   const selectedClip =
     selectedClipId == null ? null : timeline.find((it) => it.id === selectedClipId) ?? null;
 
@@ -1120,8 +1042,6 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
         <DashboardPanel currentProjectId={projectId} />
       ) : (
         <MediaPanel
-          aiMessage={aiMessage}
-          aiStatus={aiStatus}
           beatGrid={beatGrid}
           beatStatus={beatStatus}
           fileInputRef={fileInputRef}
@@ -1139,15 +1059,12 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
           onFiles={handleFiles}
           onRemoveCustomTrack={removeCustomTrack}
           onRemoveLibrary={removeLibraryItem}
-          onRunAi={runAIAnalysis}
           onSelectTrack={(t) => setSelectedTrackId(t.id)}
-          onSelectTransitionStyle={setTransitionStyle}
           onSetDragging={setIsDragging}
           section={navSection}
           selectedTrack={selectedTrack}
           statusMessage={statusMessage}
           timelineLength={timeline.length}
-          transitionStyle={transitionStyle}
         />
       )}
 
@@ -1306,8 +1223,8 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
         <RightPanel
           beatPeriodSeconds={beatPeriodSeconds}
           clip={selectedClip}
-          onCaptionChange={setCaption}
           onClose={() => setSelectedClipId(null)}
+          onPlaybackRateChange={setClipPlaybackRate}
           onRemove={(id) => {
             setSelectedClipId(null);
             removeItem(id);
@@ -1803,8 +1720,6 @@ const NAV_ITEMS: { id: NavSection; label: string; icon: string }[] = [
   { id: "audio", label: "Audio", icon: "♪" },
   { id: "text", label: "Text", icon: "T" },
   { id: "stickers", label: "Stickers", icon: "☆" },
-  { id: "captions", label: "Captions", icon: "❝" },
-  { id: "transitions", label: "Transitions", icon: "⇆" },
   { id: "export", label: "Export", icon: "↑" },
 ];
 
@@ -2113,8 +2028,6 @@ function DashboardPanel({
 }
 
 type MediaPanelProps = {
-  aiMessage: string;
-  aiStatus: "idle" | "running" | "ok" | "error";
   audioUploading: boolean;
   beatGrid: BeatGrid | null;
   beatStatus: "idle" | "running" | "ok" | "error";
@@ -2132,21 +2045,16 @@ type MediaPanelProps = {
   onFiles: (files: FileList | null) => void | Promise<void>;
   onRemoveCustomTrack: (track: MusicTrack) => void | Promise<void>;
   onRemoveLibrary: (id: string) => void;
-  onRunAi: () => void | Promise<void>;
   onSelectTrack: (t: MusicTrack) => void;
-  onSelectTransitionStyle: (s: TransitionStyle) => void;
   onSetDragging: (v: boolean) => void;
   section: NavSection;
   selectedTrack: MusicTrack;
   statusMessage: string;
   timelineLength: number;
-  transitionStyle: TransitionStyle;
 };
 
 function MediaPanel(props: MediaPanelProps) {
   const {
-    aiMessage,
-    aiStatus,
     audioUploading,
     beatGrid,
     beatStatus,
@@ -2164,15 +2072,12 @@ function MediaPanel(props: MediaPanelProps) {
     onFiles,
     onRemoveCustomTrack,
     onRemoveLibrary,
-    onRunAi,
     onSelectTrack,
-    onSelectTransitionStyle,
     onSetDragging,
     section,
     selectedTrack,
     statusMessage,
     timelineLength,
-    transitionStyle,
   } = props;
   const audioInputRef = useRef<HTMLInputElement>(null);
 
@@ -2359,20 +2264,6 @@ function MediaPanel(props: MediaPanelProps) {
           </>
         ) : null}
 
-        {section === "captions" ? (
-          <div className="grid gap-2">
-            <button
-              className="rounded-full bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:opacity-50"
-              disabled={aiStatus === "running" || timelineLength === 0}
-              onClick={() => void onRunAi()}
-              type="button"
-            >
-              {aiStatus === "running" ? "Working…" : "Auto-caption with AI"}
-            </button>
-            <p className="text-[11px] leading-4 text-[var(--muted)]">{aiMessage}</p>
-          </div>
-        ) : null}
-
         {section === "text" ? <TextPanelContent onAddText={onAddText} /> : null}
 
         {section === "stickers" ? (
@@ -2410,12 +2301,6 @@ function MediaPanel(props: MediaPanelProps) {
           </div>
         ) : null}
 
-        {section === "transitions" ? (
-          <TransitionsPanelContent
-            onSelect={onSelectTransitionStyle}
-            value={transitionStyle}
-          />
-        ) : null}
       </div>
     </aside>
   );
@@ -2475,76 +2360,26 @@ function StickerPanelContent({
   );
 }
 
-const TRANSITION_LABELS: Record<TransitionStyle, { label: string; hint: string }> = {
-  cycle: { label: "Cycle (default)", hint: "Rotates fade → slide → wipe" },
-  fade: { label: "Fade", hint: "Smooth cross-dissolve" },
-  slide: { label: "Slide", hint: "Push next clip in horizontally" },
-  wipe: { label: "Wipe", hint: "Sweep diagonally between clips" },
-  flip: { label: "Flip", hint: "3D flip onto the next clip" },
-  "clock-wipe": { label: "Clock wipe", hint: "Radial wipe around the centre" },
-  none: { label: "None", hint: "Hard cut, no animation" },
-};
-
-function TransitionsPanelContent({
-  onSelect,
-  value,
-}: {
-  onSelect: (s: TransitionStyle) => void;
-  value: TransitionStyle;
-}) {
-  return (
-    <div className="grid gap-3">
-      <p className="text-[11px] leading-4 text-[var(--muted)]">
-        Applied between every clip on the timeline. Updates the preview live;
-        saved with the project.
-      </p>
-      <div className="grid gap-1.5">
-        {TRANSITION_STYLES.map((style) => {
-          const active = value === style;
-          const meta = TRANSITION_LABELS[style];
-          return (
-            <button
-              aria-pressed={active}
-              className={`rounded-lg border px-3 py-2 text-left text-xs transition ${
-                active
-                  ? "border-[var(--accent)] bg-[var(--accent-soft)]"
-                  : "border-[var(--line)] bg-[var(--panel-soft)] hover:border-[var(--line-strong)]"
-              }`}
-              key={style}
-              onClick={() => onSelect(style)}
-              type="button"
-            >
-              <div className="font-semibold">{meta.label}</div>
-              <p className="mt-0.5 text-[11px] leading-4 text-[var(--muted)]">
-                {meta.hint}
-              </p>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
 type RightPanelProps = {
   clip: TimelineMedia | null;
   beatPeriodSeconds: number | null;
-  onCaptionChange: (id: string, text: string) => void;
-  onRemove: (id: string) => void;
   onClose: () => void;
+  onPlaybackRateChange: (id: string, value: number) => void;
+  onRemove: (id: string) => void;
 };
 
 function RightPanel({
   clip,
   beatPeriodSeconds,
-  onCaptionChange,
-  onRemove,
   onClose,
+  onPlaybackRateChange,
+  onRemove,
 }: RightPanelProps) {
   if (!clip) return null;
   const seconds = clip.beats != null && beatPeriodSeconds
     ? clip.beats * beatPeriodSeconds
     : clip.durationSeconds ?? null;
+  const playbackRate = clip.playbackRate ?? 1;
   return (
     <aside
       data-right-panel
@@ -2579,22 +2414,32 @@ function RightPanel({
           </div>
         ) : null}
 
-        <label className="mt-1 grid gap-1">
-          <span className="text-[10px] uppercase tracking-wider text-[var(--muted)]">Caption</span>
-          <input
-            className="rounded-md border border-[var(--line)] bg-[var(--panel-soft)] px-2 py-1.5 text-xs focus:border-[var(--accent)] focus:outline-none"
-            onChange={(e) => onCaptionChange(clip.id, e.target.value)}
-            placeholder="Add caption…"
-            type="text"
-            value={clip.caption ?? ""}
-          />
-        </label>
-
-        <PlaceholderRow label="Speed" />
-        <PlaceholderRow label="Volume" />
-        <PlaceholderRow label="Filters" />
-        <PlaceholderRow label="Animation" />
-        <PlaceholderRow label="Adjust" />
+        {clip.kind === "video" ? (
+          <label className="mt-1 grid gap-1">
+            <span className="flex items-center justify-between text-[10px] uppercase tracking-wider text-[var(--muted)]">
+              <span>Speed</span>
+              <span className="font-mono text-[10px] text-[var(--ink-soft)]">
+                {playbackRate.toFixed(2)}×
+              </span>
+            </span>
+            <input
+              className="accent-[var(--accent)]"
+              max={2}
+              min={0.5}
+              onChange={(e) =>
+                onPlaybackRateChange(clip.id, Number(e.target.value))
+              }
+              step={0.05}
+              type="range"
+              value={playbackRate}
+            />
+            <div className="flex justify-between text-[10px] text-[var(--muted)]">
+              <span>0.5×</span>
+              <span>1×</span>
+              <span>2×</span>
+            </div>
+          </label>
+        ) : null}
 
         <button
           className="mt-2 rounded-md border border-[var(--line)] bg-[var(--panel-soft)] px-2 py-1.5 text-xs font-medium text-rose-600 transition hover:bg-rose-50 hover:text-rose-700"
@@ -2605,15 +2450,6 @@ function RightPanel({
         </button>
       </div>
     </aside>
-  );
-}
-
-function PlaceholderRow({ label }: { label: string }) {
-  return (
-    <div className="flex items-center justify-between rounded-md border border-[var(--line)] bg-[var(--panel-soft)] px-2 py-1.5">
-      <span className="font-medium">{label}</span>
-      <span className="text-[10px] text-[var(--muted)]">soon</span>
-    </div>
   );
 }
 

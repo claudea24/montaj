@@ -23,6 +23,8 @@ export type TimelineMedia = {
   /** Sparse JPEG thumbnails for static UI (library tile poster + rail filmstrip).
    *  NOT used during playback — the slot renders the real <Video> directly. */
   previewFrames?: string[];
+  /** Playback speed for videos. 1 = normal, 0.5 = half-speed, 2 = double-speed. */
+  playbackRate?: number;
 };
 
 export type MusicTrack = {

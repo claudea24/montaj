@@ -37,7 +37,6 @@ type SlideshowCompositionProps = {
   fallbackSecondsPerImage: number;
   captions?: string[];
   transitionFrames?: number;
-  transitionStyle?: TransitionStyle;
   overlays?: Overlay[];
   // When set, the matching overlay renders fully transparent so the inline
   // editor in the drag layer above the player is the only visible copy.
@@ -80,7 +79,6 @@ export function SlideshowComposition({
   fallbackSecondsPerImage,
   captions,
   transitionFrames = 12,
-  transitionStyle = "cycle",
   overlays,
   editingOverlayId,
 }: SlideshowCompositionProps) {
@@ -148,7 +146,7 @@ export function SlideshowComposition({
             elements.push(
               <TransitionSeries.Transition
                 key={`${item.id}-t`}
-                presentation={presentationFor(transitionStyle, sequenceIdx)}
+                presentation={presentationFor("cycle", sequenceIdx)}
                 timing={linearTiming({ durationInFrames: safeOverlap })}
               />,
             );
@@ -311,6 +309,7 @@ function SlotContent({ item, index, totalFrames, startFrom, caption }: SlotConte
   const scaleEnd = isVideo ? 1 : variant === 0 ? 1.12 : variant === 1 ? 1.0 : 1.06;
   const xStart = isVideo ? 0 : variant === 2 ? -4 : variant === 3 ? 4 : 0;
   const xEnd = isVideo ? 0 : variant === 2 ? 4 : variant === 3 ? -4 : 0;
+  const playbackRate = item.playbackRate && item.playbackRate > 0 ? item.playbackRate : 1;
 
   const scale = interpolate(frame, [0, totalFrames], [scaleStart, scaleEnd], {
     extrapolateLeft: "clamp",
@@ -336,6 +335,7 @@ function SlotContent({ item, index, totalFrames, startFrom, caption }: SlotConte
           // for remote MOV/MP4 files in headless Chrome.
           <OffthreadVideo
             muted
+            playbackRate={playbackRate}
             src={item.src}
             {...videoTrimProps}
             style={{
@@ -353,6 +353,7 @@ function SlotContent({ item, index, totalFrames, startFrom, caption }: SlotConte
             acceptableTimeShiftInSeconds={10}
             muted
             pauseWhenBuffering={false}
+            playbackRate={playbackRate}
             src={item.src}
             {...videoTrimProps}
             style={{
