@@ -680,56 +680,72 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
   }
 
   const [exportStatus, setExportStatus] = useState<
-    "idle" | "done" | "error"
+    "idle" | "rendering" | "done" | "error"
   >("idle");
   const [exportMessage, setExportMessage] = useState<string>(
-    "Saves your project's current state — timeline, overlays, music choice, custom audio tracks — as a JSON file you can keep as a backup or re-import later.",
+    "Renders your reel to an MP4 on the server using Remotion + ffmpeg. Take a moment — render time scales with reel length.",
   );
 
-  function handleExport() {
-    if (!projectId) {
+  async function handleExport() {
+    if (timeline.length === 0) {
       setExportStatus("error");
-      setExportMessage("Open or create a project first.");
+      setExportMessage("Add clips to the timeline before exporting.");
       return;
     }
-    const draft = {
-      schemaVersion: 1,
-      app: "montaj",
-      exportedAt: new Date().toISOString(),
-      projectId,
-      document: {
-        timeline,
-        selectedTrackId,
-        targetSeconds,
-        overlays,
-      } satisfies ProjectDocument,
-      // Custom audio tracks include storage paths so the project can be
-      // re-hydrated against Supabase later (signed URLs in `src` may have
-      // expired by the time the file is re-imported).
-      customTracks: customTracks.map((t) => ({
-        id: t.id,
-        name: t.name,
-        durationSeconds: t.durationSeconds,
-        storagePath: t.storagePath,
-      })),
-    };
-    const json = JSON.stringify(draft, null, 2);
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `montaj-draft-${projectId.slice(0, 8)}-${new Date()
-      .toISOString()
-      .replace(/[:.]/g, "-")
-      .slice(0, 19)}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    setExportStatus("done");
+    setExportStatus("rendering");
     setExportMessage(
-      `Draft downloaded — ${timeline.length} clip${timeline.length === 1 ? "" : "s"}, ${overlays.length} overlay${overlays.length === 1 ? "" : "s"}.`,
+      `Rendering ${(totalFrames / FPS).toFixed(1)}s of video on the server… expect 30–60s.`,
     );
+
+    // Make all media URLs absolute so the headless Chrome on the server can
+    // fetch them (relative URLs resolve to the bundle serve URL, not the app).
+    const origin = window.location.origin;
+    const absolute = (src: string) =>
+      src.startsWith("http") || src.startsWith("blob:") ? src : new URL(src, origin).href;
+
+    const inputProps = {
+      ...playerInputProps,
+      images: playerInputProps.images.map((it) => ({
+        ...it,
+        src: absolute(it.src),
+      })),
+      soundtrackSrc: absolute(playerInputProps.soundtrackSrc),
+    };
+
+    try {
+      const res = await fetch("/api/render-mp4", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ inputProps }),
+      });
+      if (!res.ok) {
+        const errText = await res.text();
+        let msg = errText;
+        try {
+          msg = JSON.parse(errText).error ?? errText;
+        } catch {}
+        throw new Error(msg);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `montaj-reel-${new Date()
+        .toISOString()
+        .replace(/[:.]/g, "-")
+        .slice(0, 19)}.mp4`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setExportStatus("done");
+      setExportMessage("MP4 downloaded — check your Downloads folder.");
+    } catch (e) {
+      setExportStatus("error");
+      setExportMessage(
+        `Render failed: ${e instanceof Error ? e.message : "unknown error"}`,
+      );
+    }
   }
 
   async function handleAudioFiles(files: FileList | null) {
@@ -2075,7 +2091,7 @@ type MediaPanelProps = {
   beatStatus: "idle" | "running" | "ok" | "error";
   customTracks: MusicTrack[];
   exportMessage: string;
-  exportStatus: "idle" | "done" | "error";
+  exportStatus: "idle" | "rendering" | "done" | "error";
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   isDragging: boolean;
   isUploading: boolean;
@@ -2334,10 +2350,13 @@ function MediaPanel(props: MediaPanelProps) {
           <div className="grid gap-3">
             <button
               className="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:opacity-50"
+              disabled={exportStatus === "rendering" || timelineLength === 0}
               onClick={() => void onExport()}
               type="button"
             >
-              ↓ Download project draft (.json)
+              {exportStatus === "rendering"
+                ? "Rendering…"
+                : "↓ Render & download (.mp4)"}
             </button>
             <p
               className={`text-[11px] leading-4 ${
@@ -2351,11 +2370,9 @@ function MediaPanel(props: MediaPanelProps) {
               {exportMessage}
             </p>
             <p className="text-[10px] leading-4 text-[var(--muted)]">
-              The file contains the full editable state of your project —
-              clip order, trims, text overlays, stickers, music selection,
-              and references to your uploaded media. It does not include the
-              source video files themselves; those stay in Supabase storage.
-              Use this as a portable backup of your latest draft.
+              Rendered server-side via Remotion + headless Chrome + ffmpeg
+              (H.264 / 1080×1920 / 30fps). Vercel function timeout is 60s, so
+              very long reels may fail — keep clips to under ~45s for safety.
             </p>
           </div>
         ) : null}

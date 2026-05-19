@@ -10,3 +10,4 @@ tsconfig.tsbuildinfo
 .vercel
 .playwright-mcp
 testing
+public/remotion-bundle

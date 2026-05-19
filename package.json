@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build --webpack",
+    "remotion:bundle": "node scripts/bundle-remotion.mjs",
+    "build": "npm run remotion:bundle && next build --webpack",
     "start": "next start",
     "lint": "eslint ."
   },
@@ -15,8 +16,11 @@
     "@dnd-kit/utilities": "^3.2.2",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@ffprobe-installer/ffprobe": "^2.1.2",
+    "@remotion/bundler": "^4.0.463",
     "@remotion/player": "^4.0.457",
+    "@remotion/renderer": "^4.0.463",
     "@remotion/transitions": "^4.0.457",
+    "@sparticuz/chromium-min": "^131.0.1",
     "@supabase/supabase-js": "^2.49.8",
     "heic-to": "^1.4.2",
     "next": "16.2.3",

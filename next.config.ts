@@ -12,6 +12,8 @@ const nextConfig: NextConfig = {
   serverExternalPackages: [
     "@ffmpeg-installer/ffmpeg",
     "@ffprobe-installer/ffprobe",
+    "@remotion/renderer",
+    "@sparticuz/chromium-min",
   ],
   // The bundled ffmpeg/ffprobe binaries live in platform-specific subfolders
   // (e.g. linux-x64 on Vercel). Next.js's default file tracer sometimes
@@ -21,6 +23,11 @@ const nextConfig: NextConfig = {
     "/api/transcode-video": [
       "./node_modules/@ffmpeg-installer/**/*",
       "./node_modules/@ffprobe-installer/**/*",
+    ],
+    "/api/render-mp4": [
+      "./node_modules/@remotion/renderer/**/*",
+      "./node_modules/@sparticuz/chromium-min/**/*",
+      "./node_modules/@ffmpeg-installer/**/*",
     ],
   },
 };
