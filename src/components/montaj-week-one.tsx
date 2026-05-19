@@ -76,9 +76,7 @@ type NavSection =
   | "text"
   | "stickers"
   | "captions"
-  | "effects"
   | "transitions"
-  | "filters"
   | "export";
 
 type MontajWeekOneProps = {
@@ -681,6 +679,80 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
     );
   }
 
+  const [exportStatus, setExportStatus] = useState<
+    "idle" | "requesting" | "recording" | "done" | "error"
+  >("idle");
+  const [exportMessage, setExportMessage] = useState<string>(
+    "Click below to record your reel — you'll be asked to share this tab. Then the timeline plays through once and the result is saved as a .webm file.",
+  );
+
+  async function handleExport() {
+    if (timeline.length === 0) {
+      setExportStatus("error");
+      setExportMessage("Add clips to the timeline first.");
+      return;
+    }
+    const player = playerRef.current;
+    if (!player) {
+      setExportStatus("error");
+      setExportMessage("Player not ready yet — try again.");
+      return;
+    }
+
+    setExportStatus("requesting");
+    setExportMessage("Pick this tab in the share dialog…");
+
+    let stream: MediaStream;
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 30 },
+        audio: true,
+      });
+    } catch {
+      setExportStatus("error");
+      setExportMessage("Screen-share permission denied.");
+      return;
+    }
+
+    const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")
+      ? "video/webm;codecs=vp9,opus"
+      : "video/webm";
+    const recorder = new MediaRecorder(stream, { mimeType: mime });
+    const chunks: Blob[] = [];
+    recorder.ondataavailable = (e) => {
+      if (e.data.size > 0) chunks.push(e.data);
+    };
+    recorder.onstop = () => {
+      const blob = new Blob(chunks, { type: "video/webm" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `montaj-reel-${new Date()
+        .toISOString()
+        .replace(/[:.]/g, "-")
+        .slice(0, 19)}.webm`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      stream.getTracks().forEach((t) => t.stop());
+      setExportStatus("done");
+      setExportMessage("Reel downloaded — check your Downloads folder.");
+    };
+
+    setExportStatus("recording");
+    setExportMessage(
+      `Recording for ${Math.round(totalFrames / FPS)}s. Don't switch tabs.`,
+    );
+    recorder.start(100);
+    player.seekTo(0);
+    player.play();
+    const durationMs = (totalFrames / FPS) * 1000 + 600;
+    setTimeout(() => {
+      if (recorder.state !== "inactive") recorder.stop();
+    }, durationMs);
+  }
+
   async function handleAudioFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
     if (!supabase || !userId || !projectId) {
@@ -1036,9 +1108,12 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
           library={library}
           audioUploading={audioUploading}
           customTracks={customTracks}
+          exportMessage={exportMessage}
+          exportStatus={exportStatus}
           onAddSticker={addStickerOverlay}
           onAddText={addTextOverlay}
           onAudioFiles={handleAudioFiles}
+          onExport={handleExport}
           onFiles={handleFiles}
           onRemoveCustomTrack={removeCustomTrack}
           onRemoveLibrary={removeLibraryItem}
@@ -1705,9 +1780,7 @@ const NAV_ITEMS: { id: NavSection; label: string; icon: string }[] = [
   { id: "text", label: "Text", icon: "T" },
   { id: "stickers", label: "Stickers", icon: "☆" },
   { id: "captions", label: "Captions", icon: "❝" },
-  { id: "effects", label: "Effects", icon: "✶" },
   { id: "transitions", label: "Transitions", icon: "⇆" },
-  { id: "filters", label: "Filters", icon: "◐" },
   { id: "export", label: "Export", icon: "↑" },
 ];
 
@@ -2022,6 +2095,8 @@ type MediaPanelProps = {
   beatGrid: BeatGrid | null;
   beatStatus: "idle" | "running" | "ok" | "error";
   customTracks: MusicTrack[];
+  exportMessage: string;
+  exportStatus: "idle" | "requesting" | "recording" | "done" | "error";
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   isDragging: boolean;
   isUploading: boolean;
@@ -2029,6 +2104,7 @@ type MediaPanelProps = {
   onAddText: () => void;
   onAddSticker: (glyph: string) => void;
   onAudioFiles: (files: FileList | null) => void | Promise<void>;
+  onExport: () => void | Promise<void>;
   onFiles: (files: FileList | null) => void | Promise<void>;
   onRemoveCustomTrack: (track: MusicTrack) => void | Promise<void>;
   onRemoveLibrary: (id: string) => void;
@@ -2049,6 +2125,8 @@ function MediaPanel(props: MediaPanelProps) {
     beatGrid,
     beatStatus,
     customTracks,
+    exportMessage,
+    exportStatus,
     fileInputRef,
     isDragging,
     isUploading,
@@ -2056,6 +2134,7 @@ function MediaPanel(props: MediaPanelProps) {
     onAddText,
     onAddSticker,
     onAudioFiles,
+    onExport,
     onFiles,
     onRemoveCustomTrack,
     onRemoveLibrary,
@@ -2272,13 +2351,47 @@ function MediaPanel(props: MediaPanelProps) {
           <StickerPanelContent onAddSticker={onAddSticker} />
         ) : null}
 
-        {section !== "media" &&
-        section !== "audio" &&
-        section !== "captions" &&
-        section !== "text" &&
-        section !== "stickers" ? (
+        {section === "export" ? (
+          <div className="grid gap-3">
+            <button
+              className="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:opacity-50"
+              disabled={
+                exportStatus === "requesting" ||
+                exportStatus === "recording" ||
+                timelineLength === 0
+              }
+              onClick={() => void onExport()}
+              type="button"
+            >
+              {exportStatus === "recording"
+                ? "Recording…"
+                : exportStatus === "requesting"
+                  ? "Waiting for permission…"
+                  : "↓ Record & download (.webm)"}
+            </button>
+            <p
+              className={`text-[11px] leading-4 ${
+                exportStatus === "error"
+                  ? "text-rose-600"
+                  : exportStatus === "done"
+                    ? "text-emerald-600"
+                    : "text-[var(--muted)]"
+              }`}
+            >
+              {exportMessage}
+            </p>
+            <p className="text-[10px] leading-4 text-[var(--muted)]">
+              Tip: in the share dialog, pick &quot;Chrome Tab&quot; (or your
+              browser&apos;s equivalent) and select this tab — that records
+              just the preview area, not your whole screen. Recording runs in
+              real time, so a 20-second reel takes 20 seconds.
+            </p>
+          </div>
+        ) : null}
+
+        {section === "transitions" ? (
           <div className="rounded-lg border border-dashed border-[var(--line-strong)] bg-[var(--panel-soft)] p-6 text-center text-xs leading-5 text-[var(--muted)]">
-            {section.charAt(0).toUpperCase() + section.slice(1)} coming soon.
+            Transitions coming soon.
           </div>
         ) : null}
       </div>
