@@ -115,6 +115,57 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
   );
   const effectiveNavSection: NavSection = projectId ? navSection : "dashboard";
 
+  // Preview canvas zoom + pan state. "fit" computes to scale 1 with the
+  // current aspect-ratio layout (the inner already contains the video within
+  // the wrapper). 0.5/1/2 = explicit %.
+  type PreviewZoom = "fit" | 0.5 | 1 | 2;
+  const [previewZoom, setPreviewZoom] = useState<PreviewZoom>("fit");
+  const [previewPan, setPreviewPan] = useState({ x: 0, y: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const panRef = useRef<{
+    startClientX: number;
+    startClientY: number;
+    initialPanX: number;
+    initialPanY: number;
+  } | null>(null);
+  const effectiveZoom = previewZoom === "fit" ? 1 : previewZoom;
+  function setZoomAndRecenter(next: PreviewZoom) {
+    setPreviewZoom(next);
+    setPreviewPan({ x: 0, y: 0 });
+  }
+
+  function startPan(e: React.PointerEvent<HTMLDivElement>) {
+    const t = e.target as HTMLElement;
+    if (
+      t.closest(
+        "[data-overlay-handle], [data-overlay-resize-handle], [data-overlay-editor], [data-preview-zoom]",
+      )
+    )
+      return;
+    panRef.current = {
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      initialPanX: previewPan.x,
+      initialPanY: previewPan.y,
+    };
+    setIsPanning(true);
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  }
+  function movePan(e: React.PointerEvent<HTMLDivElement>) {
+    const drag = panRef.current;
+    if (!drag) return;
+    setPreviewPan({
+      x: drag.initialPanX + (e.clientX - drag.startClientX),
+      y: drag.initialPanY + (e.clientY - drag.startClientY),
+    });
+  }
+  function endPan(e: React.PointerEvent<HTMLDivElement>) {
+    if (!panRef.current) return;
+    panRef.current = null;
+    setIsPanning(false);
+    e.currentTarget.releasePointerCapture?.(e.pointerId);
+  }
+
   const handleNavSelect = useCallback(
     (id: NavSection) => {
       if (id === "dashboard") {
@@ -911,7 +962,7 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
 
   return (
     <main
-      className="relative flex h-screen w-full overflow-hidden bg-[var(--bg)] text-[var(--ink)]"
+      className="relative flex h-screen w-full flex-col overflow-hidden bg-[var(--bg)] text-[var(--ink)] sm:flex-row"
       onClick={handleMainClick}
     >
       <div className="pointer-events-auto absolute right-3 top-3 z-50 flex items-center gap-3">
@@ -973,11 +1024,30 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
         />
       )}
 
-      <section className="flex min-h-0 flex-1 flex-col gap-3 bg-[var(--bg-soft)] px-3 py-3">
-        <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-3">
+      {/* Right panel: strict flex column with vertical overflow handling.
+          When the viewport is shorter than (preview min + toolbar + timeline),
+          the wrapper scrolls instead of pushing the timeline off-screen. */}
+      <section className="flex w-full min-h-0 flex-1 flex-col gap-2 overflow-y-auto bg-[var(--bg-soft)] px-3 py-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--line-strong)] [&::-webkit-scrollbar]:w-2">
+        {/* Video preview — flex-grow:1 with a tight min so the timeline below
+            always fits. Acts as a bounded viewport (overflow-hidden) for an
+            inner zoom/pan-able canvas. Cursor reflects grab/grabbing state. */}
+        <div
+          className={`relative flex min-h-0 flex-1 items-center justify-center overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-2 ${
+            isPanning ? "cursor-grabbing" : "cursor-grab"
+          }`}
+          onPointerCancel={endPan}
+          onPointerDown={startPan}
+          onPointerMove={movePan}
+          onPointerUp={endPan}
+        >
           <div
-            className="relative overflow-hidden rounded-xl bg-[var(--panel-strong)]"
-            style={{ height: "100%", aspectRatio: "9 / 16" }}
+            className="relative h-full max-w-full overflow-hidden rounded-xl bg-[var(--panel-strong)]"
+            style={{
+              aspectRatio: "9 / 16",
+              transform: `translate(${previewPan.x}px, ${previewPan.y}px) scale(${effectiveZoom})`,
+              transformOrigin: "center center",
+              transition: isPanning ? "none" : "transform 0.15s ease-out",
+            }}
           >
             <Player
               acknowledgeRemotionLicense
@@ -1004,13 +1074,37 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
                 if (id !== editingOverlayId) setEditingOverlayId(null);
                 if (id != null) {
                   const o = overlays.find((ov) => ov.id === id);
-                  // Mid-point so we land past the fade-in animation.
                   if (o) seekToOverlayMid(o);
                 }
               }}
               overlays={overlays}
               selectedOverlayId={selectedOverlayId}
             />
+          </div>
+
+          {/* Zoom dropdown — bottom-right of the preview viewport. Pointer
+              events are stopped so clicking the dropdown doesn't start a pan. */}
+          <div
+            className="absolute bottom-3 right-3 z-20 flex items-center gap-2"
+            data-preview-zoom
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <select
+              aria-label="Preview zoom"
+              className="cursor-pointer rounded-md border border-[var(--line)] bg-[var(--panel)]/95 px-2 py-1 text-xs font-medium text-[var(--ink-soft)] shadow-sm backdrop-blur transition hover:border-[var(--accent)]"
+              onChange={(e) => {
+                const v = e.target.value;
+                setZoomAndRecenter(
+                  v === "fit" ? "fit" : (Number(v) as PreviewZoom),
+                );
+              }}
+              value={previewZoom === "fit" ? "fit" : String(previewZoom)}
+            >
+              <option value="fit">Fit</option>
+              <option value="0.5">50%</option>
+              <option value="1">100%</option>
+              <option value="2">200%</option>
+            </select>
           </div>
         </div>
 
@@ -1022,7 +1116,9 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
           totalFrames={totalFrames}
         />
 
-        <section className="shrink-0 rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-3">
+        {/* Timeline — shrink-0 + min-h-[350px] keeps it anchored at the bottom
+            and never compressed when the viewport shrinks. */}
+        <section className="min-h-[350px] shrink-0 overflow-auto rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-2">
           <TimelineRail
             beatPeriodSeconds={beatPeriodSeconds}
             currentFrame={currentFrame}
@@ -1054,8 +1150,6 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
               if (id != null) {
                 setSelectedClipId(null);
                 const o = overlays.find((ov) => ov.id === id);
-                // Seek to the overlay's mid-point so the user lands past the
-                // fade-in (otherwise the overlay is invisible at startSeconds).
                 if (o) seekToOverlayMid(o);
               }
             }}
@@ -1598,8 +1692,8 @@ function LeftNav({
   hasProject: boolean;
 }) {
   return (
-    <nav className="flex w-[72px] shrink-0 flex-col items-stretch gap-1 border-r border-[var(--line)] bg-[var(--panel)] py-3">
-      <div className="mb-2 px-2 text-center text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--accent)]">
+    <nav className="flex w-full shrink-0 flex-row items-center gap-1 overflow-x-auto border-b border-[var(--line)] bg-[var(--panel)] px-2 py-2 sm:w-[72px] sm:flex-col sm:items-stretch sm:overflow-visible sm:border-b-0 sm:border-r sm:px-0 sm:py-3">
+      <div className="mx-2 shrink-0 text-[10px] font-semibold uppercase tracking-[0.18em] text-[var(--accent)] sm:mb-2 sm:mx-0 sm:px-2 sm:text-center">
         Montaj
       </div>
       {NAV_ITEMS.map((it) => {
@@ -1612,7 +1706,7 @@ function LeftNav({
             aria-pressed={isActive}
             disabled={disabled}
             title={it.label}
-            className={`mx-1.5 flex flex-col items-center gap-1 rounded-lg px-1 py-2 transition ${
+            className={`flex shrink-0 flex-col items-center gap-1 rounded-lg px-2 py-1.5 transition sm:mx-1.5 sm:px-1 sm:py-2 ${
               isActive
                 ? "bg-[var(--accent-soft)] text-[var(--accent-strong)]"
                 : disabled
@@ -1947,7 +2041,7 @@ function MediaPanel(props: MediaPanelProps) {
   const audioInputRef = useRef<HTMLInputElement>(null);
 
   return (
-    <aside className="flex w-[300px] shrink-0 flex-col border-r border-[var(--line)] bg-[var(--panel)]">
+    <aside className="flex w-full shrink-0 flex-col border-b border-[var(--line)] bg-[var(--panel)] sm:max-h-none max-h-[40vh] sm:w-[300px] sm:border-b-0 sm:border-r">
       <div className="flex shrink-0 items-center justify-between border-b border-[var(--line)] px-4 py-3">
         <h2 className="text-sm font-medium capitalize text-[var(--ink-soft)]">{section}</h2>
         {section === "media" ? (
@@ -2239,7 +2333,7 @@ function RightPanel({
   return (
     <aside
       data-right-panel
-      className="flex w-[300px] shrink-0 flex-col border-l border-[var(--line)] bg-[var(--panel)]"
+      className="flex w-full shrink-0 flex-col border-t border-[var(--line)] bg-[var(--panel)] sm:max-h-none max-h-[50vh] sm:w-[300px] sm:border-l sm:border-t-0"
     >
       <div className="flex shrink-0 items-center justify-between border-b border-[var(--line)] px-4 py-3">
         <h2 className="truncate text-sm font-medium text-[var(--ink-soft)]" title={clip.name}>{clip.name}</h2>
@@ -2252,7 +2346,7 @@ function RightPanel({
           ✕
         </button>
       </div>
-      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4 text-xs">
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto overscroll-contain p-4 text-xs [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--line-strong)] [&::-webkit-scrollbar]:w-2">
         <div className="grid gap-1">
           <div className="text-[10px] uppercase tracking-wider text-[var(--muted)]">Type</div>
           <div className="font-medium">{clip.kind}</div>
@@ -2357,7 +2451,7 @@ function OverlayRightPanel({
   return (
     <aside
       data-right-panel
-      className="flex w-[300px] shrink-0 flex-col border-l border-[var(--line)] bg-[var(--panel)]"
+      className="flex w-full shrink-0 flex-col border-t border-[var(--line)] bg-[var(--panel)] sm:max-h-none max-h-[50vh] sm:w-[300px] sm:border-l sm:border-t-0"
     >
       <div className="flex shrink-0 items-center justify-between border-b border-[var(--line)] px-4 py-3">
         <h2 className="truncate text-sm font-medium text-[var(--ink-soft)]">
@@ -2372,7 +2466,7 @@ function OverlayRightPanel({
           ✕
         </button>
       </div>
-      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto p-4 text-xs">
+      <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto overscroll-contain p-4 text-xs [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--line-strong)] [&::-webkit-scrollbar]:w-2">
         <div className="grid gap-1">
           <div className="text-[10px] uppercase tracking-wider text-[var(--muted)]">Type</div>
           <div className="font-medium">{overlay.kind}</div>

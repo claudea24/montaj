@@ -415,7 +415,7 @@ export function TimelineRail({
       </div>
 
       <div
-        className="overflow-x-auto overflow-y-hidden rounded-[24px] border border-[var(--line)] bg-white/60 p-4"
+        className="overflow-x-auto overflow-y-hidden rounded-[24px] border border-[var(--line)] bg-white/60 p-3"
         onDragLeave={handleDragLeaveRail}
         onDragOver={handleDragOverRail}
         onDrop={handleDropRail}
@@ -482,11 +482,11 @@ export function TimelineRail({
               </SortableContext>
             </DndContext>
 
-            {overlays && overlays.length > 0 && beatPeriodSeconds ? (
+            {beatPeriodSeconds ? (
               <OverlayTrack
                 onSelectOverlay={onSelectOverlay}
                 onTimingChange={onOverlayTimingChange}
-                overlays={overlays}
+                overlays={overlays ?? []}
                 pxPerSecond={pxPerBeat / beatPeriodSeconds}
                 railWidthPx={railWidthPx}
                 selectedOverlayId={selectedOverlayId}
@@ -793,10 +793,15 @@ function OverlayTrack({
 }: OverlayTrackProps) {
   return (
     <div
-      className="relative mt-3 h-9"
+      className="relative mt-1.5 h-8 rounded-md bg-[var(--panel-soft)]/60"
       data-overlay-track
       style={{ width: `${railWidthPx}px` }}
     >
+      {overlays.length === 0 ? (
+        <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-[10px] uppercase tracking-wider text-[var(--muted)]">
+          Text & stickers
+        </span>
+      ) : null}
       {overlays.map((overlay) => (
         <OverlayBar
           isSelected={selectedOverlayId === overlay.id}
@@ -884,7 +889,7 @@ function OverlayBar({
 
   return (
     <div
-      className={`absolute top-0 flex h-9 items-center overflow-hidden rounded-md border text-[11px] font-medium transition select-none ${
+      className={`absolute top-0 flex h-8 items-center overflow-hidden rounded-md border text-[11px] font-medium transition select-none ${
         isSelected
           ? "border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent-strong)]"
           : "border-[var(--line)] bg-[var(--panel-soft)] text-[var(--ink-soft)] hover:border-[var(--line-strong)]"
