@@ -2,6 +2,7 @@ import { auth } from "@clerk/nextjs/server";
 import { renderMedia, selectComposition } from "@remotion/renderer";
 import { createClient } from "@supabase/supabase-js";
 import chromium from "@sparticuz/chromium-min";
+import axios from "axios";
 import { createReadStream, promises as fs } from "node:fs";
 import path from "node:path";
 import { Readable } from "node:stream";
@@ -88,23 +89,38 @@ export async function POST(req: Request) {
 
     if (serviceKey) {
       try {
-        const supabase = createClient(
-          process.env.NEXT_PUBLIC_SUPABASE_URL!,
-          serviceKey,
-          { auth: { persistSession: false } },
-        );
         const storagePath = `${userId}/exports/${filename}`;
-        const fileBuffer = await fs.readFile(outputPath);
-        const { error: uploadError } = await supabase.storage
-          .from("montaj-media")
-          .upload(storagePath, fileBuffer, {
-            contentType: "video/mp4",
-            upsert: false,
-          });
-        if (uploadError) {
-          console.error("[render-mp4] upload error:", uploadError);
-          // Fall through to streaming; keep the temp file alive for that path.
-        } else {
+        // Upload directly via axios — Node's built-in fetch (undici) drops
+        // the socket mid-transfer on ~40MB buffered uploads to Supabase
+        // storage. axios uses Node's http(s) module which handles large
+        // bodies reliably. Stream the file from disk so we don't double
+        // memory pressure.
+        const stat0 = await fs.stat(outputPath);
+        const uploadResp = await axios.post(
+          `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/montaj-media/${storagePath}`,
+          createReadStream(outputPath),
+          {
+            headers: {
+              Authorization: `Bearer ${serviceKey}`,
+              apikey: serviceKey,
+              "Content-Type": "video/mp4",
+              "Content-Length": String(stat0.size),
+              "x-upsert": "false",
+            },
+            maxBodyLength: Infinity,
+            maxContentLength: Infinity,
+            // Disable timeout for slow uploads (38MB can take a while).
+            timeout: 0,
+          },
+        );
+        if (uploadResp.status >= 200 && uploadResp.status < 300) {
+          // Use Supabase JS client just for signing the URL — small request,
+          // works fine over fetch.
+          const supabase = createClient(
+            process.env.NEXT_PUBLIC_SUPABASE_URL!,
+            serviceKey,
+            { auth: { persistSession: false } },
+          );
           const { data: signed, error: signError } = await supabase.storage
             .from("montaj-media")
             .createSignedUrl(storagePath, 3600, { download: filename });
@@ -118,9 +134,20 @@ export async function POST(req: Request) {
               { headers: { "Content-Type": "application/json" } },
             );
           }
+        } else {
+          console.error(
+            "[render-mp4] upload returned",
+            uploadResp.status,
+            uploadResp.data,
+          );
         }
       } catch (e) {
-        console.error("[render-mp4] supabase upload failed, will stream:", e);
+        const ae = e as { response?: { status?: number; data?: unknown }; message?: string };
+        console.error(
+          "[render-mp4] supabase upload failed, will stream:",
+          ae?.response?.status,
+          ae?.response?.data ?? ae?.message ?? e,
+        );
       }
     }
 
