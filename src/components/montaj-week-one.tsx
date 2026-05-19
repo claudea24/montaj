@@ -680,77 +680,56 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
   }
 
   const [exportStatus, setExportStatus] = useState<
-    "idle" | "requesting" | "recording" | "done" | "error"
+    "idle" | "done" | "error"
   >("idle");
   const [exportMessage, setExportMessage] = useState<string>(
-    "Click below to record your reel — you'll be asked to share this tab. Then the timeline plays through once and the result is saved as a .webm file.",
+    "Saves your project's current state — timeline, overlays, music choice, custom audio tracks — as a JSON file you can keep as a backup or re-import later.",
   );
 
-  async function handleExport() {
-    if (timeline.length === 0) {
+  function handleExport() {
+    if (!projectId) {
       setExportStatus("error");
-      setExportMessage("Add clips to the timeline first.");
+      setExportMessage("Open or create a project first.");
       return;
     }
-    const player = playerRef.current;
-    if (!player) {
-      setExportStatus("error");
-      setExportMessage("Player not ready yet — try again.");
-      return;
-    }
-
-    setExportStatus("requesting");
-    setExportMessage("Pick this tab in the share dialog…");
-
-    let stream: MediaStream;
-    try {
-      stream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: 30 },
-        audio: true,
-      });
-    } catch {
-      setExportStatus("error");
-      setExportMessage("Screen-share permission denied.");
-      return;
-    }
-
-    const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9,opus")
-      ? "video/webm;codecs=vp9,opus"
-      : "video/webm";
-    const recorder = new MediaRecorder(stream, { mimeType: mime });
-    const chunks: Blob[] = [];
-    recorder.ondataavailable = (e) => {
-      if (e.data.size > 0) chunks.push(e.data);
+    const draft = {
+      schemaVersion: 1,
+      app: "montaj",
+      exportedAt: new Date().toISOString(),
+      projectId,
+      document: {
+        timeline,
+        selectedTrackId,
+        targetSeconds,
+        overlays,
+      } satisfies ProjectDocument,
+      // Custom audio tracks include storage paths so the project can be
+      // re-hydrated against Supabase later (signed URLs in `src` may have
+      // expired by the time the file is re-imported).
+      customTracks: customTracks.map((t) => ({
+        id: t.id,
+        name: t.name,
+        durationSeconds: t.durationSeconds,
+        storagePath: t.storagePath,
+      })),
     };
-    recorder.onstop = () => {
-      const blob = new Blob(chunks, { type: "video/webm" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `montaj-reel-${new Date()
-        .toISOString()
-        .replace(/[:.]/g, "-")
-        .slice(0, 19)}.webm`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      stream.getTracks().forEach((t) => t.stop());
-      setExportStatus("done");
-      setExportMessage("Reel downloaded — check your Downloads folder.");
-    };
-
-    setExportStatus("recording");
+    const json = JSON.stringify(draft, null, 2);
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `montaj-draft-${projectId.slice(0, 8)}-${new Date()
+      .toISOString()
+      .replace(/[:.]/g, "-")
+      .slice(0, 19)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    setExportStatus("done");
     setExportMessage(
-      `Recording for ${Math.round(totalFrames / FPS)}s. Don't switch tabs.`,
+      `Draft downloaded — ${timeline.length} clip${timeline.length === 1 ? "" : "s"}, ${overlays.length} overlay${overlays.length === 1 ? "" : "s"}.`,
     );
-    recorder.start(100);
-    player.seekTo(0);
-    player.play();
-    const durationMs = (totalFrames / FPS) * 1000 + 600;
-    setTimeout(() => {
-      if (recorder.state !== "inactive") recorder.stop();
-    }, durationMs);
   }
 
   async function handleAudioFiles(files: FileList | null) {
@@ -2096,7 +2075,7 @@ type MediaPanelProps = {
   beatStatus: "idle" | "running" | "ok" | "error";
   customTracks: MusicTrack[];
   exportMessage: string;
-  exportStatus: "idle" | "requesting" | "recording" | "done" | "error";
+  exportStatus: "idle" | "done" | "error";
   fileInputRef: React.RefObject<HTMLInputElement | null>;
   isDragging: boolean;
   isUploading: boolean;
@@ -2355,19 +2334,10 @@ function MediaPanel(props: MediaPanelProps) {
           <div className="grid gap-3">
             <button
               className="rounded-lg bg-[var(--accent)] px-3 py-2 text-xs font-semibold text-white transition hover:bg-[var(--accent-strong)] disabled:opacity-50"
-              disabled={
-                exportStatus === "requesting" ||
-                exportStatus === "recording" ||
-                timelineLength === 0
-              }
               onClick={() => void onExport()}
               type="button"
             >
-              {exportStatus === "recording"
-                ? "Recording…"
-                : exportStatus === "requesting"
-                  ? "Waiting for permission…"
-                  : "↓ Record & download (.webm)"}
+              ↓ Download project draft (.json)
             </button>
             <p
               className={`text-[11px] leading-4 ${
@@ -2381,10 +2351,11 @@ function MediaPanel(props: MediaPanelProps) {
               {exportMessage}
             </p>
             <p className="text-[10px] leading-4 text-[var(--muted)]">
-              Tip: in the share dialog, pick &quot;Chrome Tab&quot; (or your
-              browser&apos;s equivalent) and select this tab — that records
-              just the preview area, not your whole screen. Recording runs in
-              real time, so a 20-second reel takes 20 seconds.
+              The file contains the full editable state of your project —
+              clip order, trims, text overlays, stickers, music selection,
+              and references to your uploaded media. It does not include the
+              source video files themselves; those stay in Supabase storage.
+              Use this as a portable backup of your latest draft.
             </p>
           </div>
         ) : null}
