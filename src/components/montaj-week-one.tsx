@@ -1027,7 +1027,7 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
       {/* Right panel: strict flex column with vertical overflow handling.
           When the viewport is shorter than (preview min + toolbar + timeline),
           the wrapper scrolls instead of pushing the timeline off-screen. */}
-      <section className="flex w-full min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-y-auto bg-[var(--bg-soft)] px-3 py-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--line-strong)] [&::-webkit-scrollbar]:w-2">
+      <section className="flex w-full min-h-0 flex-1 flex-col gap-2 overflow-y-auto bg-[var(--bg-soft)] px-3 py-2 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--line-strong)] [&::-webkit-scrollbar]:w-2">
         {/* Video preview — flex-grow:1 with a tight min so the timeline below
             always fits. Acts as a bounded viewport (overflow-hidden) for an
             inner zoom/pan-able canvas. Cursor reflects grab/grabbing state. */}
