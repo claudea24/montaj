@@ -1,7 +1,8 @@
 import { renderMedia, selectComposition } from "@remotion/renderer";
 import chromium from "@sparticuz/chromium-min";
-import { promises as fs } from "node:fs";
+import { createReadStream, promises as fs } from "node:fs";
 import path from "node:path";
+import { Readable } from "node:stream";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -63,13 +64,22 @@ export async function POST(req: Request) {
       pixelFormat: "yuv420p",
     });
 
-    const file = await fs.readFile(outputPath);
-    await fs.unlink(outputPath).catch(() => {});
-
-    return new Response(file as unknown as BodyInit, {
+    // Stream the file back instead of buffering into memory — Vercel
+    // serverless functions cap buffered response bodies at 4.5 MB, but
+    // streamed responses can be much larger. A 20s 1080×1920 reel is ~38 MB
+    // so buffering would truncate it.
+    const stat = await fs.stat(outputPath);
+    const nodeStream = createReadStream(outputPath);
+    nodeStream.on("close", () => {
+      void fs.unlink(outputPath).catch(() => {});
+    });
+    const webStream = Readable.toWeb(nodeStream) as unknown as ReadableStream<Uint8Array>;
+    return new Response(webStream, {
       headers: {
         "Content-Type": "video/mp4",
+        "Content-Length": String(stat.size),
         "Content-Disposition": 'attachment; filename="montaj-reel.mp4"',
+        "Cache-Control": "no-store",
       },
     });
   } catch (e) {
