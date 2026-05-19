@@ -727,17 +727,25 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
         throw new Error(msg);
       }
       const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `montaj-reel-${new Date()
+      const filename = `montaj-reel-${new Date()
         .toISOString()
         .replace(/[:.]/g, "-")
         .slice(0, 19)}.mp4`;
+      // Wrap the blob in a File so the filename + MIME stick when the
+      // browser turns the blob URL into a saved file — some Chromium
+      // builds drop both unless they're carried this way.
+      const file = new File([blob], filename, { type: "video/mp4" });
+      const url = URL.createObjectURL(file);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.rel = "noopener";
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      // Delay revoke so the browser finishes writing to disk before the
+      // blob URL is invalidated.
+      setTimeout(() => URL.revokeObjectURL(url), 30_000);
       setExportStatus("done");
       setExportMessage("MP4 downloaded — check your Downloads folder.");
     } catch (e) {
