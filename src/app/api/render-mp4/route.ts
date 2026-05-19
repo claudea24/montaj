@@ -1,4 +1,6 @@
+import { auth } from "@clerk/nextjs/server";
 import { renderMedia, selectComposition } from "@remotion/renderer";
+import { createClient } from "@supabase/supabase-js";
 import chromium from "@sparticuz/chromium-min";
 import { createReadStream, promises as fs } from "node:fs";
 import path from "node:path";
@@ -64,10 +66,58 @@ export async function POST(req: Request) {
       pixelFormat: "yuv420p",
     });
 
-    // Stream the file back instead of buffering into memory — Vercel
-    // serverless functions cap buffered response bodies at 4.5 MB, but
-    // streamed responses can be much larger. A 20s 1080×1920 reel is ~38 MB
-    // so buffering would truncate it.
+    // If a service-role Supabase key is configured, upload the rendered
+    // MP4 to storage and return a signed URL — that gives the browser a
+    // native download flow with a proper filename and bypasses Vercel
+    // response-size limits. Without service role we fall back to
+    // streaming the file directly (works but the browser may strip the
+    // .mp4 extension on save).
+    const { userId } = await auth();
+    if (!userId) {
+      return new Response(JSON.stringify({ error: "Not authenticated" }), {
+        status: 401,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    const timestamp = new Date()
+      .toISOString()
+      .replace(/[:.]/g, "-")
+      .slice(0, 19);
+    const filename = `montaj-reel-${timestamp}.mp4`;
+
+    if (serviceKey) {
+      const supabase = createClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        serviceKey,
+        { auth: { persistSession: false } },
+      );
+      const storagePath = `${userId}/exports/${filename}`;
+      const fileBuffer = await fs.readFile(outputPath);
+      const { error: uploadError } = await supabase.storage
+        .from("montaj-media")
+        .upload(storagePath, fileBuffer, {
+          contentType: "video/mp4",
+          upsert: false,
+        });
+      await fs.unlink(outputPath).catch(() => {});
+      if (!uploadError) {
+        const { data: signed } = await supabase.storage
+          .from("montaj-media")
+          .createSignedUrl(storagePath, 3600, { download: filename });
+        if (signed?.signedUrl) {
+          return new Response(
+            JSON.stringify({ downloadUrl: signed.signedUrl, filename }),
+            { headers: { "Content-Type": "application/json" } },
+          );
+        }
+      }
+    }
+
+    // Streaming fallback. Sets Content-Disposition with the timestamped
+    // filename and inline Content-Length so the browser knows the full
+    // size; streams from /tmp so Vercel's buffered-response cap doesn't
+    // truncate it. Stream cleans up the temp file on close.
     const stat = await fs.stat(outputPath);
     const nodeStream = createReadStream(outputPath);
     nodeStream.on("close", () => {
@@ -78,7 +128,7 @@ export async function POST(req: Request) {
       headers: {
         "Content-Type": "video/mp4",
         "Content-Length": String(stat.size),
-        "Content-Disposition": 'attachment; filename="montaj-reel.mp4"',
+        "Content-Disposition": `attachment; filename="${filename}"`,
         "Cache-Control": "no-store",
       },
     });

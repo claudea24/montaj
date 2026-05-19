@@ -726,26 +726,31 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
         } catch {}
         throw new Error(msg);
       }
-      const blob = await res.blob();
-      const filename = `montaj-reel-${new Date()
-        .toISOString()
-        .replace(/[:.]/g, "-")
-        .slice(0, 19)}.mp4`;
-      // Wrap the blob in a File so the filename + MIME stick when the
-      // browser turns the blob URL into a saved file — some Chromium
-      // builds drop both unless they're carried this way.
-      const file = new File([blob], filename, { type: "video/mp4" });
-      const url = URL.createObjectURL(file);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = filename;
-      a.rel = "noopener";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      // Delay revoke so the browser finishes writing to disk before the
-      // blob URL is invalidated.
-      setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      // Server returns either:
+      //   - application/json with { downloadUrl }  → navigate to signed
+      //     Supabase URL, browser handles download natively (preferred,
+      //     requires SUPABASE_SERVICE_ROLE_KEY env var server-side).
+      //   - video/mp4 stream → fall back to blob + anchor download.
+      const ct = res.headers.get("Content-Type") ?? "";
+      if (ct.includes("application/json")) {
+        const { downloadUrl } = (await res.json()) as { downloadUrl: string };
+        window.location.assign(downloadUrl);
+      } else {
+        const blob = await res.blob();
+        const filename = `montaj-reel-${new Date()
+          .toISOString()
+          .replace(/[:.]/g, "-")
+          .slice(0, 19)}.mp4`;
+        const file = new File([blob], filename, { type: "video/mp4" });
+        const url = URL.createObjectURL(file);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      }
       setExportStatus("done");
       setExportMessage("MP4 downloaded — check your Downloads folder.");
     } catch (e) {
