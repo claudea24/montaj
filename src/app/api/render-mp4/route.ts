@@ -58,6 +58,9 @@ export async function POST(req: Request) {
       // Bump delayRender() timeout — slow Supabase signed URLs can stall video
       // loading past the default 30s.
       timeoutInMilliseconds: 90_000,
+      // Force broadly-compatible pixel format. Default yuvj420p (full range)
+      // is rejected by QuickTime/Safari and some embedded players.
+      pixelFormat: "yuv420p",
     });
 
     const file = await fs.readFile(outputPath);
