@@ -1161,9 +1161,11 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
           totalFrames={totalFrames}
         />
 
-        {/* Timeline — shrink-0 + min-h-[350px] keeps it anchored at the bottom
-            and never compressed when the viewport shrinks. */}
-        <section className="min-h-[350px] shrink-0 overflow-auto rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-2">
+        {/* Timeline — content-sized so the empty drop zone doesn't reserve a
+            350px void below the preview. Bounded by max-h-[40vh] when populated
+            so it can't dominate on shorter viewports; scrolls internally past
+            that. `shrink-0` keeps it from being compressed under its content. */}
+        <section className="max-h-[40vh] shrink-0 overflow-auto rounded-2xl border border-[var(--line)] bg-[var(--panel)] p-2 transition-[max-height] duration-300">
           <TimelineRail
             beatPeriodSeconds={beatPeriodSeconds}
             currentFrame={currentFrame}
