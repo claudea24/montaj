@@ -20,6 +20,9 @@ import {
 import { fade } from "@remotion/transitions/fade";
 import { slide } from "@remotion/transitions/slide";
 import { wipe } from "@remotion/transitions/wipe";
+import { flip } from "@remotion/transitions/flip";
+import { clockWipe } from "@remotion/transitions/clock-wipe";
+import { none } from "@remotion/transitions/none";
 import type { TimelineMedia } from "@/lib/media";
 import type { Overlay } from "@/lib/overlays";
 import { twemojiUrlFor } from "@/lib/overlays";
@@ -34,18 +37,37 @@ type SlideshowCompositionProps = {
   fallbackSecondsPerImage: number;
   captions?: string[];
   transitionFrames?: number;
+  transitionStyle?: TransitionStyle;
   overlays?: Overlay[];
   // When set, the matching overlay renders fully transparent so the inline
   // editor in the drag layer above the player is the only visible copy.
   editingOverlayId?: string | null;
 };
 
-const PRESENTATION_CYCLE = ["fade", "slide", "wipe"] as const;
-type PresentationName = (typeof PRESENTATION_CYCLE)[number];
+export const TRANSITION_STYLES = [
+  "cycle",
+  "fade",
+  "slide",
+  "wipe",
+  "flip",
+  "clock-wipe",
+  "none",
+] as const;
+export type TransitionStyle = (typeof TRANSITION_STYLES)[number];
+const CYCLE_ORDER = ["fade", "slide", "wipe"] as const;
 
-function presentationFor(name: PresentationName): TransitionPresentation<Record<string, unknown>> {
-  if (name === "slide") return slide() as TransitionPresentation<Record<string, unknown>>;
-  if (name === "wipe") return wipe() as TransitionPresentation<Record<string, unknown>>;
+function presentationFor(
+  style: TransitionStyle,
+  sequenceIdx: number,
+): TransitionPresentation<Record<string, unknown>> {
+  const resolved =
+    style === "cycle" ? CYCLE_ORDER[sequenceIdx % CYCLE_ORDER.length] : style;
+  if (resolved === "slide") return slide() as TransitionPresentation<Record<string, unknown>>;
+  if (resolved === "wipe") return wipe() as TransitionPresentation<Record<string, unknown>>;
+  if (resolved === "flip") return flip() as TransitionPresentation<Record<string, unknown>>;
+  if (resolved === "clock-wipe")
+    return clockWipe({ width: 1080, height: 1920 }) as unknown as TransitionPresentation<Record<string, unknown>>;
+  if (resolved === "none") return none() as TransitionPresentation<Record<string, unknown>>;
   return fade() as TransitionPresentation<Record<string, unknown>>;
 }
 
@@ -58,6 +80,7 @@ export function SlideshowComposition({
   fallbackSecondsPerImage,
   captions,
   transitionFrames = 12,
+  transitionStyle = "cycle",
   overlays,
   editingOverlayId,
 }: SlideshowCompositionProps) {
@@ -113,8 +136,6 @@ export function SlideshowComposition({
             </TransitionSeries.Sequence>,
           ];
           if (sequenceIdx < slots.length - 1) {
-            const presentationName =
-              PRESENTATION_CYCLE[sequenceIdx % PRESENTATION_CYCLE.length];
             const nextFrames = slots[sequenceIdx + 1].frames;
             const safeOverlap = Math.max(
               2,
@@ -127,7 +148,7 @@ export function SlideshowComposition({
             elements.push(
               <TransitionSeries.Transition
                 key={`${item.id}-t`}
-                presentation={presentationFor(presentationName)}
+                presentation={presentationFor(transitionStyle, sequenceIdx)}
                 timing={linearTiming({ durationInFrames: safeOverlap })}
               />,
             );

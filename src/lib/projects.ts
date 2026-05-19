@@ -1,12 +1,14 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { TimelineMedia } from "@/lib/media";
 import type { Overlay } from "@/lib/overlays";
+import type { TransitionStyle } from "@/components/slideshow-composition";
 
 export type ProjectDocument = {
   timeline: TimelineMedia[];
   selectedTrackId: string;
   targetSeconds: number;
   overlays?: Overlay[];
+  transitionStyle?: TransitionStyle;
 };
 
 type ProjectRow = {

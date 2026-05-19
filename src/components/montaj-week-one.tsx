@@ -46,6 +46,10 @@ import {
   type Overlay,
   type OverlayAnimation,
 } from "@/lib/overlays";
+import {
+  TRANSITION_STYLES,
+  type TransitionStyle,
+} from "@/components/slideshow-composition";
 import { OVERLAY_FONTS, type OverlayFontId } from "@/lib/fonts";
 
 const FPS = 30;
@@ -233,6 +237,7 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
     beatStatusByTrack[selectedTrack.src] ?? "idle";
 
   const [targetSeconds, setTargetSeconds] = useState(DEFAULT_TARGET_SECONDS);
+  const [transitionStyle, setTransitionStyle] = useState<TransitionStyle>("cycle");
 
   const [aiStatus, setAiStatus] = useState<"idle" | "running" | "ok" | "error">("idle");
   const [aiMessage, setAiMessage] = useState<string>(
@@ -348,11 +353,18 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
           setTargetSeconds(doc.targetSeconds ?? DEFAULT_TARGET_SECONDS);
           const migratedOverlays = (doc.overlays ?? []).map(migrateLoadedOverlay);
           setOverlays(migratedOverlays);
+          const loadedTransition: TransitionStyle = (
+            TRANSITION_STYLES as readonly string[]
+          ).includes(doc.transitionStyle ?? "")
+            ? (doc.transitionStyle as TransitionStyle)
+            : "cycle";
+          setTransitionStyle(loadedTransition);
           loadedDoc = {
             timeline: resolvedTimeline,
             selectedTrackId: doc.selectedTrackId ?? MUSIC_LIBRARY[0].id,
             targetSeconds: doc.targetSeconds ?? DEFAULT_TARGET_SECONDS,
             overlays: migratedOverlays,
+            transitionStyle: loadedTransition,
           };
         }
         // Mark loaded for both branches (project with document, and a fresh
@@ -441,7 +453,7 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
   useEffect(() => {
     if (!projectLoaded) return;
     dirtyRef.current = true;
-  }, [timeline, selectedTrack, targetSeconds, overlays, projectLoaded]);
+  }, [timeline, selectedTrack, targetSeconds, overlays, transitionStyle, projectLoaded]);
 
   // 15s autosave loop. Skips when nothing has changed.
   useEffect(() => {
@@ -453,6 +465,7 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
         selectedTrackId: selectedTrack.id,
         targetSeconds,
         overlays,
+        transitionStyle,
       };
       const snapshot = JSON.stringify(doc);
       // Compare against the last known-on-disk snapshot. If the in-memory
@@ -482,7 +495,7 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
       }
     }, AUTOSAVE_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [supabase, projectId, projectLoaded, timeline, selectedTrack, targetSeconds, overlays]);
+  }, [supabase, projectId, projectLoaded, timeline, selectedTrack, targetSeconds, overlays, transitionStyle]);
 
   const togglePlay = useCallback(() => {
     const p = playerRef.current;
@@ -625,9 +638,10 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
     fallbackSecondsPerImage: FALLBACK_SECONDS_PER_IMAGE,
     captions: timeline.length > 0 ? captions : undefined,
     transitionFrames: TRANSITION_FRAMES,
+    transitionStyle,
     overlays,
     editingOverlayId,
-  }), [timeline, selectedTrack.src, selectedTrack.durationSeconds, perSlotFrames, perSlotStartFrames, captions, overlays, editingOverlayId]);
+  }), [timeline, selectedTrack.src, selectedTrack.durationSeconds, perSlotFrames, perSlotStartFrames, captions, overlays, editingOverlayId, transitionStyle]);
   function removeItem(id: string) {
     setTimeline((current) => {
       const removed = current.find((it) => it.id === id);
@@ -1127,11 +1141,13 @@ export function MontajWeekOne({ projectId }: MontajWeekOneProps) {
           onRemoveLibrary={removeLibraryItem}
           onRunAi={runAIAnalysis}
           onSelectTrack={(t) => setSelectedTrackId(t.id)}
+          onSelectTransitionStyle={setTransitionStyle}
           onSetDragging={setIsDragging}
           section={navSection}
           selectedTrack={selectedTrack}
           statusMessage={statusMessage}
           timelineLength={timeline.length}
+          transitionStyle={transitionStyle}
         />
       )}
 
@@ -2118,11 +2134,13 @@ type MediaPanelProps = {
   onRemoveLibrary: (id: string) => void;
   onRunAi: () => void | Promise<void>;
   onSelectTrack: (t: MusicTrack) => void;
+  onSelectTransitionStyle: (s: TransitionStyle) => void;
   onSetDragging: (v: boolean) => void;
   section: NavSection;
   selectedTrack: MusicTrack;
   statusMessage: string;
   timelineLength: number;
+  transitionStyle: TransitionStyle;
 };
 
 function MediaPanel(props: MediaPanelProps) {
@@ -2148,11 +2166,13 @@ function MediaPanel(props: MediaPanelProps) {
     onRemoveLibrary,
     onRunAi,
     onSelectTrack,
+    onSelectTransitionStyle,
     onSetDragging,
     section,
     selectedTrack,
     statusMessage,
     timelineLength,
+    transitionStyle,
   } = props;
   const audioInputRef = useRef<HTMLInputElement>(null);
 
@@ -2391,9 +2411,10 @@ function MediaPanel(props: MediaPanelProps) {
         ) : null}
 
         {section === "transitions" ? (
-          <div className="rounded-lg border border-dashed border-[var(--line-strong)] bg-[var(--panel-soft)] p-6 text-center text-xs leading-5 text-[var(--muted)]">
-            Transitions coming soon.
-          </div>
+          <TransitionsPanelContent
+            onSelect={onSelectTransitionStyle}
+            value={transitionStyle}
+          />
         ) : null}
       </div>
     </aside>
@@ -2449,6 +2470,57 @@ function StickerPanelContent({
             />
           </button>
         ))}
+      </div>
+    </div>
+  );
+}
+
+const TRANSITION_LABELS: Record<TransitionStyle, { label: string; hint: string }> = {
+  cycle: { label: "Cycle (default)", hint: "Rotates fade → slide → wipe" },
+  fade: { label: "Fade", hint: "Smooth cross-dissolve" },
+  slide: { label: "Slide", hint: "Push next clip in horizontally" },
+  wipe: { label: "Wipe", hint: "Sweep diagonally between clips" },
+  flip: { label: "Flip", hint: "3D flip onto the next clip" },
+  "clock-wipe": { label: "Clock wipe", hint: "Radial wipe around the centre" },
+  none: { label: "None", hint: "Hard cut, no animation" },
+};
+
+function TransitionsPanelContent({
+  onSelect,
+  value,
+}: {
+  onSelect: (s: TransitionStyle) => void;
+  value: TransitionStyle;
+}) {
+  return (
+    <div className="grid gap-3">
+      <p className="text-[11px] leading-4 text-[var(--muted)]">
+        Applied between every clip on the timeline. Updates the preview live;
+        saved with the project.
+      </p>
+      <div className="grid gap-1.5">
+        {TRANSITION_STYLES.map((style) => {
+          const active = value === style;
+          const meta = TRANSITION_LABELS[style];
+          return (
+            <button
+              aria-pressed={active}
+              className={`rounded-lg border px-3 py-2 text-left text-xs transition ${
+                active
+                  ? "border-[var(--accent)] bg-[var(--accent-soft)]"
+                  : "border-[var(--line)] bg-[var(--panel-soft)] hover:border-[var(--line-strong)]"
+              }`}
+              key={style}
+              onClick={() => onSelect(style)}
+              type="button"
+            >
+              <div className="font-semibold">{meta.label}</div>
+              <p className="mt-0.5 text-[11px] leading-4 text-[var(--muted)]">
+                {meta.hint}
+              </p>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
