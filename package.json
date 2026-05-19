@@ -17,16 +17,16 @@
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@ffprobe-installer/ffprobe": "^2.1.2",
     "@remotion/bundler": "^4.0.463",
-    "@remotion/player": "^4.0.457",
+    "@remotion/player": "^4.0.463",
     "@remotion/renderer": "^4.0.463",
-    "@remotion/transitions": "^4.0.457",
+    "@remotion/transitions": "^4.0.463",
     "@sparticuz/chromium-min": "^131.0.1",
     "@supabase/supabase-js": "^2.49.8",
     "heic-to": "^1.4.2",
     "next": "16.2.3",
     "react": "19.2.4",
     "react-dom": "19.2.4",
-    "remotion": "^4.0.457"
+    "remotion": "^4.0.463"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.7",
