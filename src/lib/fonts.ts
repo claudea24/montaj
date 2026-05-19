@@ -1,59 +1,9 @@
-import {
-  Anton,
-  Bebas_Neue,
-  Caveat,
-  Inter,
-  Montserrat,
-  Pacifico,
-  Permanent_Marker,
-  Playfair_Display,
-} from "next/font/google";
-
-const inter = Inter({ subsets: ["latin"], variable: "--font-overlay-inter" });
-const montserrat = Montserrat({
-  subsets: ["latin"],
-  variable: "--font-overlay-montserrat",
-  weight: ["400", "600", "800"],
-});
-const playfair = Playfair_Display({
-  subsets: ["latin"],
-  variable: "--font-overlay-playfair",
-});
-const bebas = Bebas_Neue({
-  subsets: ["latin"],
-  variable: "--font-overlay-bebas",
-  weight: "400",
-});
-const anton = Anton({
-  subsets: ["latin"],
-  variable: "--font-overlay-anton",
-  weight: "400",
-});
-const pacifico = Pacifico({
-  subsets: ["latin"],
-  variable: "--font-overlay-pacifico",
-  weight: "400",
-});
-const caveat = Caveat({
-  subsets: ["latin"],
-  variable: "--font-overlay-caveat",
-});
-const marker = Permanent_Marker({
-  subsets: ["latin"],
-  variable: "--font-overlay-marker",
-  weight: "400",
-});
-
-export const OVERLAY_FONT_VARIABLES = [
-  inter.variable,
-  montserrat.variable,
-  playfair.variable,
-  bebas.variable,
-  anton.variable,
-  pacifico.variable,
-  caveat.variable,
-  marker.variable,
-].join(" ");
+// Font lookup table for overlay text rendering. Contains no next/font imports
+// so it's safe to use from inside the Remotion bundle (where Next.js's font
+// loader does not exist). The CSS variables it references are registered by
+// `next-fonts.ts` in the Next.js shell — when running outside that shell
+// (e.g., headless Chrome during render) fonts fall back to the system stack
+// listed in each cssFamily.
 
 // CSS family strings include sensible fallbacks so unloaded fonts don't render
 // invisibly. The `id` is what we store on the overlay; `cssFamily` is what we

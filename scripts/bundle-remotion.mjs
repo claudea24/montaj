@@ -18,6 +18,10 @@ const t0 = Date.now();
 const bundleLocation = await bundle({
   entryPoint,
   publicDir,
+  // Bundle is served as a Next.js static asset at /remotion-bundle/.
+  // publicPath tells webpack to prefix every chunk URL (including the main
+  // <script src=...> in index.html) so loaded files resolve correctly.
+  publicPath: "/remotion-bundle/",
   webpackOverride: (current) => ({
     ...current,
     resolve: {

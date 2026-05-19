@@ -55,6 +55,9 @@ export async function POST(req: Request) {
       inputProps,
       browserExecutable,
       chromiumOptions: isVercel ? { gl: "angle" } : undefined,
+      // Bump delayRender() timeout — slow Supabase signed URLs can stall video
+      // loading past the default 30s.
+      timeoutInMilliseconds: 90_000,
     });
 
     const file = await fs.readFile(outputPath);

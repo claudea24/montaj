@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { ClerkProvider } from "@clerk/nextjs";
-import { OVERLAY_FONT_VARIABLES } from "@/lib/fonts";
+import { OVERLAY_FONT_VARIABLES } from "@/lib/next-fonts";
 import "./globals.css";
 
 export const metadata: Metadata = {

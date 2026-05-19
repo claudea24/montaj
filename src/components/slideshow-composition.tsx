@@ -2,8 +2,10 @@ import {
   AbsoluteFill,
   Img,
   Loop,
+  OffthreadVideo,
   Sequence,
   Video,
+  getRemotionEnvironment,
   staticFile,
   useCurrentFrame,
   useVideoConfig,
@@ -307,22 +309,39 @@ function SlotContent({ item, index, totalFrames, startFrom, caption }: SlotConte
   return (
     <AbsoluteFill style={{ alignItems: "center", justifyContent: "center" }}>
       {isVideo ? (
-        <Video
-          // Wide tolerance so brief drift (dev-mode render lag, codec stalls)
-          // doesn't trigger backward seeks that the user perceives as the
-          // clip repeating itself.
-          acceptableTimeShiftInSeconds={10}
-          muted
-          pauseWhenBuffering={false}
-          src={item.src}
-          {...videoTrimProps}
-          style={{
-            width: "100%",
-            height: "100%",
-            objectFit: "cover",
-            transform,
-          }}
-        />
+        getRemotionEnvironment().isRendering ? (
+          // Server-side render: OffthreadVideo extracts frames via canvas
+          // instead of relying on <video> playback, which is more reliable
+          // for remote MOV/MP4 files in headless Chrome.
+          <OffthreadVideo
+            muted
+            src={item.src}
+            {...videoTrimProps}
+            style={{
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              transform,
+            }}
+          />
+        ) : (
+          <Video
+            // Wide tolerance so brief drift (dev-mode render lag, codec stalls)
+            // doesn't trigger backward seeks that the user perceives as the
+            // clip repeating itself.
+            acceptableTimeShiftInSeconds={10}
+            muted
+            pauseWhenBuffering={false}
+            src={item.src}
+            {...videoTrimProps}
+            style={{
+              width: "100%",
+              height: "100%",
+              objectFit: "cover",
+              transform,
+            }}
+          />
+        )
       ) : (
         <Img
           src={item.src}
