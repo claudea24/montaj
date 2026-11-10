@@ -7,11 +7,16 @@ const isPublicRoute = createRouteMatcher([
   "/api/analyze",
 ]);
 
-export default clerkMiddleware(async (auth, req) => {
-  if (!isPublicRoute(req)) {
-    await auth.protect();
-  }
-});
+export default clerkMiddleware(
+  async (auth, req) => {
+    if (!isPublicRoute(req)) {
+      // Without an explicit sign-in URL, auth.protect() answers signed-out page
+      // requests with a 404. Send visitors to the sign-in page instead.
+      await auth.protect({ unauthenticatedUrl: new URL("/sign-in", req.url).toString() });
+    }
+  },
+  { signInUrl: "/sign-in", signUpUrl: "/sign-up" },
+);
 
 export const config = {
   matcher: [
